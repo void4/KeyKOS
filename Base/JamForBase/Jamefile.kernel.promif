@@ -1,0 +1,13 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel promif ;
+
+UseKernelFlags ;
+
+OLibrary promif : prom_devtype.c prom_env.c prom_enter.c prom_getchar.c 
+				prom_init.c prom_reboot.c prom_node.c prom_printf.c 
+				prom_putchar.c prom_prop.c prom_panic.c prom_string.c 
+				prom_map.c ;
+
+# Not listed:  prom_idp.s
+

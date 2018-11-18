@@ -1,0 +1,555 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+ 
+#include <string.h>
+#include "types.h"
+#include "kktypes.h"
+#include "keyh.h"
+#include "locore.h"
+#include "checkh.h"
+#include "splh.h"
+#include "bcopy_if.h"
+#include "kktypes.h"
+#include "cvt.h"
+#include "bootconf.h"
+#include "dependh.h"
+#include "disknodh.h"
+#include "dirent.h"
+#include "itemdefh.h"
+#include "mmu.h"
+#include "iommu.h"
+#include "misc.h"
+#include "obpdefs.h"
+#include "pte.h"
+#include "psr.h"
+#include "queuesh.h"
+#include "spaceh.h"
+#include <sparc_asm.h>
+#include "wsh.h"
+#include "sparc_mem.h"
+#include "lli.h"
+#include "kernelp.h"
+#include "memomdh.h"
+#include "locksh.h"
+#include "kerinith.h"
+#include "sysparms.h"
+#include "rngtblh.h"
+#include "kermap.h"
+#include "prepkeyh.h"
+#include "primcomh.h"
+#include "param.h"
+#include "bcopy_if.h"
+#include "intreg.h"
+
+#include "clock.h"
+
+#if defined _SYS_PROMIF_H && !defined prom_getversion
+#error "promif already included from system includes"
+#endif
+#include "promif.h"
+#ifndef prom_getversion
+#error "prom_getversion not defined"
+#endif
+#include "memlist.h"
+
+
+/* Define number of bytes of each type of space to allocate
+ * per page of page space. 
+ */
+#define NFPP 20    /* 2.0 node frames per page */
+#define DPN 015    /* 0.15 dibs per node frame */
+
+/* Fixed space for directory */
+#define MINDIRSPACE (25000*sizeof(struct DirEntry))
+
+/* Fixed space for Pixel Buffer CTE's */
+#define PIXBUFCTE_SPACE 64*sizeof(CTE)
+
+/* node frames */
+#define TABNF ((NFPP*sizeof(NODE))/10)
+
+/* dibs */
+#define TABDIB ((DPN*NFPP*sizeof(struct DIB))/10/100)
+
+/* TABDIR gives us the entries needed to satisfy checkpointlimit,
+ * and MINSPACEDIR gives us the extras needed for performance.
+ * The latter is thought not to depend on the size of memory.
+ */
+#define TABDIR ((NFPP+10)*2*sizeof(struct DirEntry)/10)
+
+/* depend space */
+#define TABDEP (10*sizeof(struct DepEnt))
+
+/* one page hash chain head per page */
+#define TABPCHHD (1*sizeof(CTE **))   	
+
+/* node hash chain heads */
+#define TABNCHHD ((1*sizeof(NODE **)*NFPP)/10)
+
+/* Space required for each page frame */
+#define SPACEPERPAGE	(PAGESIZE + sizeof(CTE) + TABNF + TABDIB + \
+			TABDIR + TABDEP + TABPCHHD + TABNCHHD)
+
+// Hereafter we declare several arrays statically whose size should depend
+// on the amount of RAM. Manana.
+// It would be feasible to make some of these symbols known to the loader
+// if we learn to like this allocation method.
+
+static struct DepEnt depspac[200];
+#if !defined(diskless_kernel)
+static long long dirspac[1000];
+#endif
+static CTE* pagechainheads[64];
+static NODE* nodechainheads[64];
+static struct DIB Dibs[32];
+static CTE coreTable[7100]; // Should suffice for Java box.
+static NODE nodes[8000]; // This must suffice for BB.
+static struct memseg tokenms; // Our first memseg.
+static struct memseg exprimms; // Our recycled memseg.
+
+ptp_t **contexts;
+
+u_int   kernel_va_base;
+u_int	kernel_va_size;
+u_int	total_ctes;
+
+iommu_pte_t     *iommu_pages;    /* bus address of the 1st iommu pages */
+iommu_pte_t      *phys_iopte;    /* phys addr of ioptes */
+unsigned long    disk_init_page; /* Reserved page for init disk buffer */
+unsigned long    first_reqsense_page; /* Reserved pages to do request sense
+				 	 scsi cmd, one for each disk */
+unsigned long    dib_pages = 0;  /* bus address of the 1st DIB pages */
+unsigned long    dib_size;       /* size of dib space in bytes */
+
+struct memseg *memsegs;
+char migratespace[MIGRATEWORKSIZE];
+char rangetspace[MAXRANGELISTS * sizeof(RANGELIST)];
+
+struct KernelPage *kernelpagept = (struct KernelPage *)NULL;
+				 /* shared kernel page VA pointer */
+
+typedef struct memlist memlist_t;
+memlist_t *virt_avail;
+
+/* #defines */
+#define roundup(x, y)   (((((int)x)+(((int)y)-1))/((int)y))*((int)y))
+#define ptp_to_pa(ptp)  (((pa_t)((u_int)(ptp) & ~PTE_ETYPEMASK)) << 4)
+#define pa_to_ptp(pa)   ((u_int) ((pa) >> 4) | MMU_ET_PTP)
+
+/* Static functions */
+static void initended(void);
+static int check_boot_version(int boots_version);
+CTE *addr2cte(u_int busaddress);
+
+/* External functions */
+extern void init_page_tables(ptpe_t *kl1pt, ptp_t *ptpool, 
+	ptp_t *ptpool_end);
+extern NODE *getmntf(struct DiskNode *dnp);
+static void cte_init(CTE *, u_int, u_int, struct memseg *);
+void init_cpu(void);
+
+static int const debug = 1;
+extern int end;
+extern int prim_nodecnt;
+extern int prim_plistcnt;
+extern int prim_pagecnt;
+extern plist_t prim_plist[];
+extern DiskNode_t prim_nodes[];
+extern char prim_pages[];
+extern struct DIB *cpudibp;
+NODE * Kernelnode; /* for Omak */
+#if defined(viking)
+int use_mix = 1; /* enable multiple instructions per cycle */
+#endif
+
+#define Missive 0xf8003f00
+#define DMZ 8
+#define dcRf 16
+#define DivvySpace 20
+#define DivvySize 24
+
+/************************************************************/
+/* HACK FOR CLOCKS and uarts                                */
+/************************************************************/
+
+struct sys_intreg *v_sipr_addr = (struct sys_intreg *)0xffeec000;
+struct count10 *v_level10clk_addr = (struct count10 *)0xffeee000;
+struct count14 *v_level14clk_addr = (struct count14 *)0xffeef000;
+caddr_t v_eeprom_addr = (caddr_t)0xffee9000;
+caddr_t line_addr = (caddr_t)0xffeeb000;
+
+    char sparc_lineb_getchar();
+    int  sparc_lineb_putchar(char);
+
+/************************************************************/
+
+void Main()
+{
+	int i;
+	NODE *np;
+	int old_memlist;
+	caddr_t from_address = (caddr_t)prim_pages;
+	caddr_t to_address;
+
+	init_cpu();
+
+	/* turn off level 14 interrupts. We'll poll for L1-A via
+	 * the level 10 interrupts (through call to uart_interrupt)
+	 */
+
+        {
+            int s,dummy;
+
+            s=splclock();
+            v_level10clk_addr->config=TMRALL_CONFIG;
+            dummy = v_level10clk_addr->limit10;
+            dummy = v_level14clk_addr->timer_msw;
+            splx(s);
+        }
+
+	old_memlist = check_boot_version(prom_getversion());
+
+        if (debug) {
+                prom_printf("Welcome to the Micro-Kernel\n");
+        }
+
+	if(*(u_int*)(Missive + DivvySize) ) crash("This is the static version!");
+//  Locate depend space:
+     	adepspac = (char *)&depspac;
+      	aenddep = (char *)&depspac+sizeof(depspac);
+
+        if (debug)
+                prom_printf("depend space: %d\n", sizeof(depspac));
+      	
+    	apagechainheads = pagechainheads;
+      	pagechainhashmask = sizeof(pagechainheads)/sizeof(CTE **)-1;
+
+	if (debug)
+                prom_printf("page hash size: %d\n", pagechainhashmask+1);
+
+      	anodechainheads = nodechainheads;
+      	nodechainhashmask = sizeof(nodechainheads)/sizeof(NODE **)-1;
+
+        if (debug)
+                prom_printf("node hash size: %d\n", nodechainhashmask+1);
+
+	dib_size = sizeof(Dibs);
+      	maxdib = dib_size/sizeof(struct DIB); /* number of DIBs */
+      	firstdib = &Dibs[0];
+
+        if (debug)
+                prom_printf("# of dib: %d\n", maxdib);
+	
+     	firstcte = &coreTable[0];
+                      	
+      	/* End of miscellaneous tables. */
+	
+      	firstnode = &nodes[0];
+      	anodeend = &nodes[0] + sizeof(nodes)/sizeof(NODE);
+
+        if (debug)
+                prom_printf("# of nodes: %d\n", anodeend-firstnode);
+
+   	/* end of Divvy up memory */
+	
+	/* Initialize ioqueues */
+	for (i = 0; i < 32; i++) {
+		ioqueues[i].head = (union Item *)&ioqueues[i];
+		ioqueues[i].tail = ioqueues[i].head;
+	}
+
+	/* Initialize all node frames */
+	for (np = firstnode; np < anodeend; np++) {
+		np->corelock = 0;
+		np->preplock = 0;
+		gspmnfa(np);   /* make node frame free */
+	}
+
+       cte_init(
+          firstcte,
+          (*(int*)(Missive+DMZ) - *(int*)(Missive+dcRf)) >> 12,
+          *(int*)(Missive+dcRf) >> 12,
+          &tokenms);
+
+       if (firstcte != addr2cte(firstcte->busaddress))
+		crash("CTE & page frame mapping error\n");
+
+	for (i = 0; i <= pagechainhashmask; i++)
+		apagechainheads[i] = NULL;
+
+	for (i = 0; i <= nodechainhashmask; i++)
+		anodechainheads[i] = NULL;
+
+      kernMap();
+
+      if(debug) 
+              prom_printf("After kernMap\n");
+
+      depends();	       /* Initialize depend */
+      
+      if(debug)
+              prom_printf("After depends\n");
+
+      kscheds();             /* Initialize ksched */
+
+      if(debug)
+              prom_printf("After kscheds\n");
+      
+      jconinit();            /* Initialize console */
+
+      memorys();             /* Initialize memory */
+      
+      priminit();
+
+      if(debug)
+              prom_printf("After memorys\n");
+  
+      memset(firstdib, 0, dib_size); /* zero dib space */
+
+      wss();		       /* Initialize DIBs */	
+
+      if(debug)
+              prom_printf("After wss\n");
+  
+
+      itime();
+
+      if(debug)
+              prom_printf("After itime\n");
+  
+      spaces();
+
+      if(debug)
+              prom_printf("After spaces\n");
+
+      init_copywin();
+        {long long v = 1;
+         Kernelnode = srchnode((uchar *)((int)&v+2));}
+      check();
+	/* Initialize primordial nodes */
+	for (i = 0; i < prim_nodecnt; i++) {
+		NODE *t;
+
+		if ((t = getmntf(&prim_nodes[i])) == NULL)
+			crash("INITS003 no node frames");
+		t->flags |= NFDIRTY;
+		if (prim_nodes[i].flags & DNPROCESS)
+		/* it has a process, put on cpu queue */
+		enqueuedom(t, &frozencpuqueue);
+	}
+
+    check();
+
+	for (i = 0; i < prim_plistcnt; i++) {
+		int j;
+		for (j = 0; j < prim_plist[i].number; j++) {
+		     CTE* cte = gspgpage();
+			ulong_t thiscda = prim_plist[i].firstcda + j;
+			if(!cte) crash("More RAM!");
+			long2b(thiscda, cte->use.page.cda, sizeof(CDA));
+			hash_the_cda(cte);
+			/* ZZZ
+			   Copy in the primordial page.
+			   We're not reusing the memory hosting the
+			   original primordial pages. We need a
+			   better way to import these pages. */
+			to_address = (caddr_t)map_uncached_window(0, (cte->busaddress)>>4, 1);	
+			memcpy(to_address, from_address, PAGESIZE);
+			from_address += PAGESIZE;
+
+			cte->flags |= ctchanged;
+			cte->ctefmt = PageFrame;
+
+			/* lock & map the shared kernel page */
+			if (thiscda == 1){
+				/* ZZZ, according to Norm, 'check' might 
+				   complain about this, fix that later 
+				   (much later:) check has learned to tolerate this.
+				   Perhaps it should not, however.*/
+				corelock_page(cte);
+				kernelpagept = (struct KernelPage *)
+                  		    map_window(KERNELWINDOW, cte, MAP_WINDOW_RW);
+			}
+		}
+	}
+
+// Below we add old primordial RAM to fungible space.
+    cte_init(
+        lastcte,
+        (from_address - (caddr_t)prim_pages) >> 12,
+        (lda03(((long)prim_pages & ~0xfff) | 0x400) >> 8),
+        &exprimms);
+
+    sta20((void *)((
+    ((uint32)prim_pages >> 24) // region number for prime pages
+    << 2) // Offset into region table
+       +
+    (int)((lda03(0x300) & ~3) << 4) // real address of kernel's region table.
+    ) // Real address of map entry that maps prime pages.
+    , 0); // zap map entry for kernel access to prime pages.
+
+check();
+
+#if !defined(diskless_kernel)
+	idirect((char *)&dirspac, sizeof(dirspac));
+	iranget(rangetspace, MAXRANGELISTS);
+	icleanl();
+	iswapa();
+	imigrate(migratespace, MIGRATEWORKSIZE);
+	iet();
+	tryformatting();
+        iommu_init();		
+        esp_attach();		 /* Initialize SCSI interface */
+#endif
+
+	/* Print version number etc. */
+	prom_printf("Pacific Prototype for SPARC\n");
+
+	cpudibp = NULL;
+
+	//..  clkstart();  .. start level 10 clock
+        if(1) {
+           int s;
+           int dummy;
+
+           s=splclock();
+           dummy=v_level10clk_addr->limit10;
+ 
+           v_level10clk_addr->limit10 =
+              ((((1000000 / 100) << CTR_USEC_SHIFT) & CTR_USEC_MASK)
+              + CTR_USEC_BASE);
+
+           splx(s);
+
+        }
+	splx(8 << 8); /* enable for level 9 and above */
+	grestart(initended);
+	nodomain();
+//	omak_default_breakpt();
+}
+
+static void 
+initended(void)
+{
+/* Here would go code to free initialization pages */
+}
+
+/*
+ * Initialize the CTE structures.
+ *
+ */
+static void
+cte_init(CTE *cte, u_int num, u_int base, struct memseg *memseg)
+// cte is the address of the first cte to be initialized.
+// num is how many cte's to initialize.
+// base is the physical page number corresponding to the first cte.
+// memseg is the address of the struct memseg to record the event in.
+// A (new) side effect is to set both apageend and lastcte to one
+// past last cte initialized.
+// We guard against overflowing coreTable.
+{
+	struct memseg *tseg;
+	u_int busaddress;
+
+    apageend = lastcte = cte+num;
+	
+    if((lastcte - firstcte)* sizeof(CTE) > sizeof(coreTable))
+                crash("Too many core frames for coreTable reservation");
+	/*
+	 * Add this segment to the list of physical memory.
+	 */
+	if (!memsegs)
+		memsegs = memseg;
+	else {
+		for (tseg = memsegs; tseg->next; tseg = tseg->next)
+			;
+		tseg->next = memseg;
+	}
+	memseg->next = (struct memseg *)NULL;
+
+	/*
+	 * Initialize the segment cache and fill in segment info.
+	 */
+	memseg->ctes = cte;
+	memseg->ectes = &cte[num];
+	memseg->pages_base = base;
+	memseg->pages_end = base + num;
+
+	total_ctes += num;
+
+	/*
+	 * The physical space for the pages array
+	 * representing ram pages has already been
+	 * allocated.  Here we initialize each cte.
+	 */
+	busaddress = base << PAGESHIFT;
+	for (; cte < lastcte; cte++) {
+		cte->busaddress = busaddress;
+		busaddress += PAGESIZE;
+		cte->flags = cte->iocount = cte->extensionflags = 0;
+
+		cte->devicelockcount = 0;
+		cte->ctefmt = FreeFrame;
+		cte->use.page.leftchain = (union Item *)cte;
+		cte->use.page.rightchain = cte->use.page.leftchain;
+		cte->zero = 0;
+		gspmpfa(cte);
+	}
+}
+
+
+/*
+ * Compare the version of boot that boot says it is against
+ * the version of boot the kernel expects.  The only mismatch
+ * we allow is 3 vs. 4, and in that case we return 1 to
+ * indicate an old-style boot memlist (the only difference
+ * between v3 and v4 is the memory list).
+ *
+ * XXX	There should be no need to use promif routines here.
+ */
+static int
+check_boot_version(int romvec_version)
+{
+  /* need to deal with this later, since it's actually the romvec version
+     we're interested in here.
+     */
+  prom_printf("romvec version is %d\n", romvec_version);
+  return 0;
+}
+
+/*
+ * Convert physical address to corresponding CTE entry.
+ */
+CTE *
+addr2cte(u_int busaddress)
+{
+	register struct memseg *tseg = memsegs;
+	/* make sure it's on the stack to avoid race conditions */
+	register u_int pfnum = (unsigned)(busaddress) >> PAGESHIFT;
+
+	while (tseg){
+		if (pfnum >= tseg->pages_base && pfnum < tseg->pages_end)
+			return tseg->ctes + (pfnum - tseg->pages_base);
+		tseg = tseg->next;
+	}
+	return ((CTE *)NULL);
+}
+
+void
+init_cpu(void)
+{
+	/* determine our cpu id and set the interrupt target
+	 * register accordingly. We need to do this so that
+	 * we can receive undirected interrupts even if we boot
+	 * up on a cpu other than cpu 0. Right now, I don't
+	 * know how to determine which cpu I'm booting from.
+	 * I thought I could read the mid register (sun4m Jul91
+	 * section 5.4.3) via a pass through ASI but that didn't
+	 * seem to work. For now, if you boot from cpu 2, you
+	 * need to set lowcoreflags.bootcpu=2 in omak).
+	 */
+
+	if (v_sipr_addr != 0)
+		set_itr(lowcoreflags.bootcpu);
+
+}

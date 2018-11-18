@@ -1,0 +1,528 @@
+ECHO "Starting Jamrules" ;
+
+# By default the built kernel will be a SPARC sun4d kernel using the
+# Sun-Reference mmu (srmmu). To change this, set ARCH, PLAT or MMU
+# appropriately on the command line. An example:
+#		jam -sPLAT=sun4d
+# macros affecting the kernel flavor
+ARCH = sparc ;
+PLAT = sun4m ;
+MMU = srmmu ;
+CPUCHIP = viking ;
+KOM = diskless_kernel ;
+
+# Define the directory under which all generated files will be put
+#
+ALL_LOCATE_TARGET = build ;
+
+# macros for specifying commands
+#CC = /opt/SUNWspro/bin/cc
+# For development
+CC = gcc ;
+NATIVE_CC = gcc ;
+AS = as ; 
+# LINK = /usr/ccs/bin/ld ; 
+LD = /usr/ccs/bin/ld ; 
+
+# macros for specifying the include file directores
+INCS_DOMAIN = domains/include include/sparc include/common ;
+INCS_KERNEL = $(PLAT) $(MMU) $(ARCH) common io ;
+HDRS_DOMAIN = $(TOP)/src/$(INCS_DOMAIN) ;
+HDRS_KERNEL = $(TOP)/src/include/$(INCS_KERNEL) $(TOP)/$(ALL_LOCATE_TARGET)/src/kernel/sun4m ;
+
+# CC and AS flags for both Domains and the Kernel
+# Need to add tools
+CCFLAGS = -mv8 ;
+CCFLAGS_KERNEL = -DKOM -D$(PLAT) -D$(KOM) ;
+#CCFLAGS_KERNEL = -DKOM -D$(PLAT) -D$(CPUCHIP) -D$(KOM) ;
+
+ASFLAGS = -P -D_ASM ;  # shared
+ASFLAGS_KERNEL = -DKOM -D$(PLAT) ;
+
+OPTIM = ; 
+# the -fno-builtin below is to work around a strcpy compiler(?) bug.
+OPTIM_DOMAIN = -O -g ;
+OPTIM_KERNEL = -ggdb -O2 -fno-builtin ;
+
+# Historical :: DELETE these after review
+#CCFLAGS = -DKOM -D$(PLAT) -Ddiskless_kernel -D_KERNEL -xcg89 -Wa,-mv8 -c ;
+# For development
+#ASFLAGS = -DKOM -D$(PLAT) -D$(CPUCHIP) -P -D_ASM ;
+
+# A macro to be used in a kernel directory to set all the 
+# subdirectory-specific header search directories, CC flags, etc.
+# appropriate for kernel modules.  
+# 
+rule UseKernelFlags {
+    SubDirHdrs $(HDRS_KERNEL) ;
+    SubDirCcFlags $(CCFLAGS_KERNEL) $(OPTIM_KERNEL) ;
+    SubDirAsFlags $(ASFLAGS_KERNEL) ;
+} 
+
+# A macro to be used in a domain directory to set all the 
+# subdirectory-specific header search directories, CC flags, etc.
+# appropriate for domains and domain-land programs.
+# 
+rule UseDomainFlags {
+    SubDirHdrs $(HDRS_DOMAIN) ;
+    SubDirCcFlags $(CCFLAGS_DOMAIN) $(OPTIM_DOMAIN) ;
+    SubDirAsFlags $(ASFLAGS_DOMAIN) ;
+} 
+
+#
+# Base dependencies - first for "bootstrap" kinds of rules
+# These are similar to rules in Jambase for standard targets 
+# such as 'all', 'first', 'libs', and 'obj'.
+#
+DEPENDS all : domains tars ;
+DEPENDS domains tars : first ;
+NOTFILE domains tars ;
+# ALWAYS boot ;
+
+# Build an executable tool to help in the build process.  For cross
+# development, this would use only local libraries and the native 
+# compiler.  Defined in terms of the Main rule.
+#
+# NOTE: The native Main rule is just used for this purpose.
+
+# Build an executable to run in the target environment.  For cross
+# compilation, this would use the corss compiler, and libraries
+# for the target environment.  Since it builds code to be 
+# incorporated into the build images, the executable names are 
+# gristed.
+#
+rule MainAsDomain {
+	_t = [ FGristFiles [ FAppendSuffix $(<) : $(SUFEXE) ] ] ;
+    Main $(_t) : $(>) ;
+	DEPENDS domains : $(_t) ;
+}
+
+# Build an intermediate library .o file so that symbols only used locally 
+# are resolved and removed from further linking.  This can be
+# substantially higher performance because linking is O(x^y; y>4)
+# NOTE: to hand libraries off from one level to another, olibraries 
+# are not Gristed (though their components are).
+#
+rule OLibrary {
+    local _t = $(<:S=$(SUFOBJ)) ; 
+    DEPENDS lib : $(<) ;
+    if $(_t) != $(<) {
+        NOTFILE $(<) ;
+        DEPENDS $(<) : $(_t) ;
+    }
+    local _s = [ FGristFiles $(>) ] ;
+    # if there's just one file, make it directly to the library.o
+	# NOTE: this rule cannot be used multiple times to add elements
+	# to a single library if one of the lines has only one source 
+	# file
+    if $(>) = $(>[1]) {
+        Object $(_t) : $(_s) ;
+        DEPENDS $(_t) : $(_s) ;
+    } else {
+        Objects $(>) ;
+        OLibrary2 $(_t) : $(_s:S=$(SUFOBJ)) ;
+    }
+}
+rule OLibrary2 {
+    Clean clean : $(<) ;
+    DEPENDS $(<) : $(>) ;
+    if ! $(<:D) {
+        MakeLocate $(<) : $(LOCATE_TARGET) ;
+    }
+}
+actions together OLibrary2 {
+    $(LD) -r -o $(<) $(>) ;
+}
+
+# Make a library that combines other object libraries into a single 
+# object library.  This rule is only necessary because of hte Grist
+# rules in OLibrary, and could be obsoleted.
+rule CombinedOLibrary {
+    local _t = $(<:S=$(SUFOBJ)) ; 
+    local _s = $(>:S=$(SUFOBJ)) ;
+    DEPENDS lib : $(<) ;
+    if $(_t) != $(<) {
+        NOTFILE $(<) ;
+        DEPENDS $(<) : $(_t) ;
+    }
+    OLibrary2 $(_t) : $(_s) ;
+}
+
+####################################################################
+#
+#    Rules for building Domains
+#
+####################################################################
+
+# Assign a MapFile to to be used for a link operation.
+# This assigns the Mapfile to the LINKMAP variable on 
+# the specified target.
+#
+# < is the target domain name, > are source files
+# This does the operation as a mod ot a defined target
+# (typically aftger the target behavior is defined), but 
+# should probably just assign a subdirectory-specific 
+# variable to be picked up by the rules that define a 
+# build (and assigned as below to the LINKMAP variable
+# on the targets).
+#
+rule SetMapFile {
+    local _t = [ FGristFiles $(<:S=$(SUFEXE)) ] ;
+    DEPENDS $(_t) : $(>) ;
+    LINKMAP on $(_t) = $(>) ;
+	# Map files are source files
+    SEARCH on $(>) = $(SEARCH_SOURCE) ;
+}
+# TODO: Mapfiles should be moved to a single, shared locations
+
+# Make a type 1 domain for each of the input files
+rule Domains1 {
+	local _i ;
+	for _i in $(<) {
+		Domain1 $(_i:B) : $(_i) ;
+	}
+}
+# Make a type 2 domain for each of the input files
+rule Domains2 {
+	local _i ;
+	for _i in $(<) {
+		Domain2 $(_i:B) : $(_i) ;
+	}
+}
+# Make a type 3 domain for each of the input files
+rule Domains3 {
+	local _i ;
+	for _i in $(<) {
+		Domain3 $(_i:B) : $(_i) ;
+	}
+}
+
+# The Common setup for all the different domain types.  
+# NOTE: the gristed domain name is returned from this routine
+rule DomainCommon {
+    local _t = [ FGristFiles $(<:S=$(SUFEXE)) ] ;
+    DEPENDS domains : $(_t) ;
+    Objects $(>) ;
+    MakeLocate $(_t) : $(LOCATE_TARGET) ;
+    LinkLibraries $(_t) : support$(SUFLIB) ;
+    Clean clean : $(_t) ;
+    return $(_t) ;
+}
+
+# The link options for domain types 1 and 2.
+local DOMAIN_LINKS = -L /netopt/gnu/lib/gcc-lib/sparc-sun-solaris2.5/2.7.2.2 
+					-lgcc ;
+
+# NOTE: The domains comes in several different types.  For some, 
+# we specify -IKLUDGE only as a means of making sure the linker accounts
+# for the size of the ELF header and program header table when
+# determining the contents of the first segment. Without it, the file
+# offset of the first text symbol would not match the virtual address
+# of the first text symbol. The value of the -I option is really not
+# important.
+
+#
+# Define a type 1 domain, which uses Mapfile1h, cfstart.o and support.a
+#
+rule Domain1 {
+    local _t = [ DomainCommon $(<) : $(>) ] ;
+    SetMapFile $(_t) : Mapfile1h ;
+    LINKLIBS on $(_t) = $(DOMAIN_LINKS) ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    INCLUDES on $(_t) = KLUDGE ;
+    DomainFilterLink $(_t) : cfstart$(SUFOBJ) $(_s:S=$(SUFOBJ)) ;
+}
+#
+# Define a type 2 domain, which conforms to ABI and uses
+# cstart.o and support.a
+#
+rule Domain2 {
+    local _t = [ DomainCommon $(<) : $(>) ] ;
+    LINKLIBS on $(_t) = $(DOMAIN_LINKS) ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    DomainLink $(_t) : cstart$(SUFOBJ) $(_s:S=$(SUFOBJ)) ;
+}
+#
+# Define a type 3 domain, which uses Mapfile1h, cfstart.o, 
+# dfalloc.o and support.a
+# TODO: dfalloc needs to be moved into support or some such.
+# right now its use is defined by all callers of this rule.
+#
+rule Domain3 {
+    local _t = [ DomainCommon $(<) : $(>) ] ;
+    SetMapFile $(_t) : Mapfile1h ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    INCLUDES on $(_t) = KLUDGE ;
+    DomainFilterLink $(_t) : cfstart$(SUFOBJ) $(_s:S=$(SUFOBJ)) ;
+}
+#
+# Define a type 4 domain, which uses no support libraries.
+#
+rule Domain4 {
+    local _t = [ DomainCommon $(<) : $(>) ] ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    DomainLink $(_t) : $(_s:S=$(SUFOBJ)) ;
+}
+
+# Define option flags that take arguments in a variable so that
+# it can include the header.  That way, the simple string
+# expansion will cause an option flag per value in the option
+# variable.  See the uses in the compile rules below.
+#
+MAP_FLAG = "-M " ;
+INC_FLAG = "-I " ;
+
+rule DomainLink {
+    DEPENDS $(<) : $(>) ;
+}
+rule DomainFilterLink {
+    DEPENDS $(<) : $(>) ;
+}
+actions together DomainLink bind LINKMAP NEEDLIBS {
+    $(LD) -dn -o $(<) $(MAP_FLAG)$(LINKMAP) $(>) $(NEEDLIBS) $(LINKLIBS) -lc
+}
+actions together DomainFilterLink bind LINKMAP NEEDLIBS {
+    $(LD) -dn -o $(<) $(INC_FLAG)$(INCLUDES) $(MAP_FLAG)$(LINKMAP) $(>) $(NEEDLIBS) $(LINKLIBS) -lc\
+         2>&1 | sed "s/.*No read-only segments found.*//g"
+}
+
+
+####################################################################
+#
+#    Rules for key invocatio macro expansion
+#
+####################################################################
+
+# Macros are expanded as a pass for compiling .ck and .sk file types.
+# The helper operations are first to be able to directly specify the 
+# expansion of a source file containing macros into a generated 
+# source file.  These rules are used to provide user-defined 
+# compilation strategies via the standard UserObject rule.  Thus,
+# listing a .ck or .sk file anywhere where source can be specified 
+# will cause the appropriate generation and compilation behavior.
+
+# KeyKOS key macro expansions
+# Invoked by: Kcpp foo.c : foo.ck ;
+# NOTE: this follows the style of the standard GenFile rule.
+#
+rule Kcpp {
+    local _t = [ FGristSourceFiles $(<) ] ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    MakeLocate $(_t) : $(LOCATE_SOURCE) ;
+    SEARCH on $(_s) = $(SEARCH_SOURCE) ;
+    SEARCH on kcpp = $(LOCATE_TARGET) ;
+    GENERATOR on $(_t) = kcpp ;
+    HDRS on $(_t) = $(SEARCH_SOURCE) $(HDRS) $(SUBDIRHDRS) ;
+    DEPENDS $(_t) : kcpp $(_s) ;
+    Clean clean : $(_t) ;
+    KcppDo $(_t) : $(_s) ;
+}
+# kcpp generates a file "kcpp.<sourcefile>".  Generate that file,
+# the move it to its final name.destination.  Note that setup
+# rules assign target-specific variables such as HDRS.
+# the :B is to change the base file name independent of 
+# what directory it is referred to in.
+#
+actions KcppDo bind GENERATOR {
+    $(GENERATOR)  $(>) $(KCPPFLAGS) -I$(HDRS) && mv $(>:B=kcpp.$(>:B)) $(<) && chmod -x $(<)
+}
+
+# The generation/compilation rule for the .ck file type.
+# Ck foo.o : foo.ck
+#
+rule Ck {
+    local _c = $(>:S=.c) ;
+    Kcpp $(_c) : $(>) ;
+    Object $(<) : $(_c) ; 
+}
+# The generation/compilation rule for the .sk file type.
+# Sk foo.o : foo.sk
+#
+rule Sk {
+    local _c = $(>:S=.s) ;
+    KCPPFLAGS on [ FGristSourceFiles $(_c) ] = -ASM ;
+    Kcpp $(_c) : $(>) ;
+    Object $(<) : $(_c) ; 
+}
+# See UserObject below for the use.
+
+####################################################################
+#
+#    Rules for building zip, tar, and tarsegs.
+#
+####################################################################
+
+# There is some attempt here to implement a general strategy for 
+# making zip segments, but I eventually settled for the hack of
+# just specifying what to Zip within the rule.  Bleh.
+# TODO: fix this.
+#
+rule ZipLib {
+    local _t =  [ FGristFiles [ FAppendSuffix $(<) : .zip ] ] ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    SEARCH on $(_s) = $(SEARCH_SOURCE) ;
+    DEPENDS lib : $(_t) ;
+    DEPENDS $(_t) : $(_s) ;
+    MakeLocate $(_t) : $(LOCATE_TARGET) ;
+    ZipDo $(_t) : $(_s) ;
+    Clean clean : $(_t) ;
+}
+#
+# Build a zip file incrementally by iterating through each source, changing to its
+# directory, and adding it to the zip file.  Note that this relies on 
+# move across file-systems working.  There are straightforward changes if that is 
+# not the case,
+actions ZipDo {
+	rm -f $(<) /tmp/$(<:BS)$USER
+	touch $(<)
+    for F in $(>) ; do ( cd `dirname $F` ; zip -0 -u -r /tmp/$(<:BS)$USER `basename $F`); done
+	mv /tmp/$(<:BS)$USER $(<)
+}
+#
+# This alternative for building zip files uses the JAR command.  It is not currently 
+# used, but has been run.  IT is here because jar is on all platforms with the same options.
+actions ZipDoUsingJar {
+	echo $(<) " : " $(>) 
+	rm -f $(<)
+	touch $(<)
+    for F in $(>) ; do jar u0Mf $(<) -C `dirname $F` `basename $F`; done
+}
+
+#
+# Define a tarseg that inludes the named files.  This can be invoked
+# multiple times for a single Tarseg and all files will be included.
+# 
+rule Tarseg {
+    local _s = [ FGristSourceFiles $(>) ] ;
+    SEARCH on $(_s) = $(SEARCH_SOURCE) ;
+    TarsegSetup $(<) : $(_s) ;
+}
+rule TarsegSetup {
+    local _t = $(<).tarseg ;
+	# ECHO "TAR: "  $(<) " to " $(>) ;
+    DEPENDS tars : $(_t) ;
+    # TODO all tars should not be dependent on all domains!
+    DEPENDS $(_t) : $(>) tarseg domains ;
+    GENERATOR on $(_t) = tarseg ;
+    MakeLocate $(_t) : $(LOCATE_TARGET) ;
+    TarsegDo $(_t) : $(>) ;
+    DEPENDS all : $(_t) ;
+    Clean clean : $(_t) ;
+}
+#
+#
+actions together TarsegDo bind GENERATOR {
+	# TODO: put the tarfile in /tmp
+    rm -f $(<:S=.tar)$USER
+    for F in $(>) ; do tar -rf $(<:S=.tar)$USER -C `dirname $F` `basename $F`; done
+    $(GENERATOR) $(<:S=.tar)$USER $(<)
+	# TODO: remove the tar file
+	# rm -f $(<:S=.tar)$USER
+}
+
+# HACK the .S rules is because one of the KK files used uppercase.  
+# That file should be renamed.
+#
+rule UserObject {
+    switch $(>:S) {
+        case .ck : Ck $(<) : $(>) ;
+        case .sk : Sk $(<) : $(>) ;
+	    case .S  : As $(<) : $(>) ;
+        case * :
+            EXIT "Unknown suffix on" $(>) "- see UserObject rule in Jamfile(5)." ;
+    }
+}
+
+# Generate a file by putting its contents to standard out.  This
+# is sometimes more convenient than making the target file an
+# argument to the generator.  Based on the standard GenFile rules.
+#
+rule GenFileContents {
+    local _t = [ FGristSourceFiles $(<) ] ;
+    local _s = [ FAppendSuffix $(>[1]) : $(SUFEXE) ] ;
+    Depends $(_t) : $(_s) $(>[2-]) ;
+    GenFileContents1 $(_t) : $(_s) $(>[2-]) ;
+    Clean clean : $(_t) ;
+}
+rule GenFileContents1 {
+    MakeLocate $(<) : $(LOCATE_SOURCE) ;
+    SEARCH on $(>) = $(SEARCH_SOURCE) ;
+}
+actions GenFileContents1 {
+    $(>[1]) $(>[2-]) > $(<)
+}
+
+#
+# create a timestamp file for integration into an overall kernel.o file.
+# Timestamp <timestamp> : <depends on>* ;
+# 
+rule Timestamp {
+    local _t = [ FGristFiles $(<) ] ;
+    local _s = $(_t:S=.s) ;
+    DEPENDS $(_t) : $(_s) ;
+    DEPENDS $(_s) : $(>) ;
+    MakeLocate $(_s) : $(LOCATE_SOURCE) ;
+    TimestampGen $(_s) ;
+#    Always $(_s) ;
+    OLibrary $(_s:S=$(SUFOBJ)) : $(_s) ;
+    Clean clean : $(_s) ;
+    return $(_t) ;
+}
+actions TimestampGen {
+    echo .ident \"TIMESTAMP=`date`\" > $(<)
+}
+
+#
+# Helper rules
+#
+# Add a CC flag for a specific executable file
+rule MainCcFlags {
+    CCFLAGS on [ FAppendSuffix $(<) : $(SUFEXE) ] += $(>) ;
+}
+
+rule MainAsFlags {
+    ASFLAGS on [ FAppendSuffix $(<) : $(SUFEXE) ] += $(>) ;
+}
+
+rule MainLinkFlags {
+    LINKFLAGS on [ FAppendSuffix $(<) : $(SUFEXE) ] += $(>) ;
+}
+
+rule SubDirSetup {
+
+    # ECHO "In SubDir: " $(<) $(>) ;
+
+    # Get path to current directory from root using SubDir.
+    # Save dir tokens for other potential uses.
+    local _s = [ FDirName $(<[2-]) ] ;
+    SUBDIR = $(_s:R=$($(<[1]))) ;
+    SUBDIR_TOKENS = $(<[2-]) ;
+
+    # Now set up SEARCH_SOURCE, LOCATE_TARGET, SOURCE_GRIST
+    # These can be reset if needed.  For example, if the source
+    # directory should not hold object files, LOCATE_TARGET can
+    # subsequently be redefined.
+
+    SEARCH_SOURCE = $(SUBDIR) ;
+    # If ALL_LOCATE_TARGET is set, build a parallel 
+    # hierarchy for the build locations
+    LOCATE_SOURCE = [ FDirName $($(<[1])) $(ALL_LOCATE_TARGET) $(SUBDIR_TOKENS) ] ;
+    LOCATE_TARGET = $(LOCATE_SOURCE) ;
+    SOURCE_GRIST = [ FGrist $(SUBDIR_TOKENS) ] ;
+    # HACK This needs to add the appropriate directories
+
+    # Reset per-directory ccflags, hdrs
+    SUBDIRCCFLAGS = ;
+    SUBDIRC++FLAGS = ;
+    SUBDIRASFLAGS = ;
+    SUBDIRHDRS = ;
+}
+
+rule SubDirAsFlags {
+    SUBDIRASFLAGS += $(<) ;
+}
+
+#SubInclude TOP src domains kcpp ;
+#SubInclude TOP src domains support ;
+
+ECHO "Finished reading Jamrules" ;

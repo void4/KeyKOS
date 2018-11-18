@@ -1,0 +1,253 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+/*         TITLE 'LSF CODE TO BUILD/DESTROY MEMORY TREE FOR KEYNIX' */
+/*  REQUIRES MACLIB GNOSIS DOMAIN */
+ 
+/*  THIS CODE BUILDS A MEMORY TREE BASED ON AN ELF FILE */
+/*  COPYING THE DATA AREA AND POINTING TO THE CODE AREA */
+ 
+/*  ON ENTRY   i0 BUILD/DESTROY SWITCH (0-BUILD) */
+/*             i1 IS THE ORDINAL        (IGNORED) */
+/*             i2 IS THE RETURN CODE IF DESTRUCTION */
+/*             i3,i4  ORDINAL/ORDERCODE FOR OBJECT */
+
+/*   The type of memory tree is based on the number of program headers */
+/*     the MAPFILE chosen deterimines the type of memory tree */
+/*     Mapfile1h  for 1 hdr   Mapfile2h for 2 hdrs 
+
+/*   TWO(2)  PHDR's  MAP TEXT, COPY DATA */
+/*      this is the model memory tree supporting MALLOC (Cstart)
+/*   SINGLE(1) PHDR  for EARLY OBJECTs  */
+/*      this is the model memory tree supporting FORK  (CFstart)
+
+/***************************************************************** */
+/* RESTRICTION!!  AT THIS TIME THIS CODE HANDLES ONLY 1 MEG OF CODE */
+/*                AND DATA SPACE EITHER COPIED OR NOT */
+ 
+/* THE RESULTANT MEMORY TREE FOR Cstart types IS ... */
+/*    000000-0FFFFF   CODE/DATA MAY BE COPIED DEPENDING ON SWITCH */
+/*    900000-9FFFFF   STACK  */
+/*     SLOT 10        Reserved  for SBRK function in domain 
+/*     SLOT 11        Reserved  for SBRK function in domain
+/*     SLOT 12        BACKGROUND KEY */
+/*     SLOT 13        THE BUILD/DESTROY CODE */
+/*     SLOT 14        DATAKEY WITH DATA SEGMENT START (FOR DESTROY) */
+/*     SLOT 15        FORMAT KEY  */
+ 
+/***************************************************************** */
+#include "keykosasm.h"
+#include "trap.h"
+
+/* the following is here for scaffold testing only! */
+#define MINFRAME        (WINDOWSIZE+ARGPUSHSIZE+4) /* min frame */
+#define STACK_ALIGN     8
+#define SA(X)   (((X)+(STACK_ALIGN-1)) & ~(STACK_ALIGN-1))
+#define WINDOWSIZE      (16*4)          /* size of window save area */
+#define ARGPUSHSIZE     (6*4)           /* size of arg dump area */
+/* end scaffold test defines */
+
+
+/* the following are seen by KCPP */
+/* but are comments to the assembler */
+ 
+! KEY CALLER=2;
+! KEY DOMKEY=3;     /* MY DOMAIN KEY */
+! KEY SB=4;         /* SPACEBANK */
+! KEY M=5;          /* METER  */
+! KEY DOMCRE=6;
+! KEY LSFNODE=7;    /* FETCHER OR SENSEKEY ON BUILD */
+! KEY LSS4=8;       /* LEAVE THESE SLOTS ALONE FOR AUX2SUBR */
+! KEY LSS3=9;
+! KEY REDROOT=10;
+! KEY BUILDER=11;   /* BUILDER SEGMENT KEY (ME) */
+! KEY AOUT=12;      /* THE A.OUT FILE */
+! KEY PAGE=13;
+! KEY ROOT=14;      /* THIS BECOMES THE MEMORY OF THE DOMAIN */
+/*                       AND ON DESTROY SEQUENCE IS THE MEMORY TREE */
+ 
+#define LSFBUILD 0  /* RO KEY TO BUILD/DESTROY CODE (ME) */
+#define LSFAOUT 1   /* RO KEY TO A.OUT FILE BYTES */
+#define LSFRO 2     /* RO KEY TO TEXT OR SAME AS SLOT 1 */
+#define LSFFSC 3    /* FRESH SEGMENT FACTORY */
+#define LSFSTACK 4  /* DATA KEY WITH STACK SIZE (KEYNIX) */
+ 
+#define LSEGFORMAT 15   /* FORMAT KEY FOR KEYNIX RED SEGMENT */
+#define LSEGDATA 14     /* DATAKEY WITH LAST DATA ADDRESS/LOW(HIGH) STACK */
+#define LSEGME 13       /* BUILD/DESTROY CODE */
+#define LSEGBASE 12     /* BACKGROUND KEY (A.OUT FILE) */
+#define LSEGSTACK 9     /* STACK SEGMENT */
+ 
+#define ROOT 14
+
+#define  Elf32_numphdrs 44
+#define  Elf32_start 24
+
+#define  Domain_GetMemory 3
+#define  Domain_SwapMemory 35
+#define  Domain_ReplaceMemory 74
+#define  Domain_SwapKey 48
+#define  Domain_GetKey 16
+
+#define  Node_Fetch 0
+#define  Node_Swap 16
+#define  Node_MakeNodeKey 35
+#define  Node_WriteData 45
+
+#define  Bank_CreatePage 16
+#define  Bank_CreateNode 0
+#define  Bank_DestroyNode 1
+#define  Bank_DestroyPage 17
+
+#define ORDERCODE_REG           %o0
+#define EXITBLK_REG             %o1
+#define ENTRYBLK_REG            %o2
+#define PASS_STR_REG            %o3
+#define PASS_STR_LEN_REG        %o4
+
+#define CT_CALL                 0x01000000
+#define CT_RETURN               0x02000000
+#define CT_FORK                 0x03000000
+
+         .seg  ".text" 
+         .type _STart, #function
+         .global _STart
+         .type buildls, #function
+         .global buildls
+         .type zapls, #function
+         .global zapls
+         .type crash, #function
+         .global crash
+
+         .ascii "LSFSIM  "
+         .word   _STart
+         .word   0
+_STart:
+/****************************************************************************************
+*****************************************************************************************
+
+    Register %l7  is used by the KALL macro (as well as all %o registers and %g1)
+
+*****************************************************************************************
+****************************************************************************************/
+/*         save %sp, -SA(MINFRAME), %sp    for scaffold testing */
+
+         KALL (DOMKEY,Domain_GetKey+ROOT) KEYSTO(REDROOT); /* in case destroy */
+         KALL(SB, Bank_CreateNode) KEYSTO (ROOT);
+         KALL(DOMKEY, Domain_GetMemory) KEYSTO (BUILDER); /* this is me */
+         KALL(ROOT, Node_Swap+0) KEYSFROM (BUILDER);  /* this is me */
+         KALL(ROOT, Node_MakeNodeKey) CHARFROM(db7,1) KEYSTO (ROOT);
+         KALL(DOMKEY, Domain_SwapMemory) KEYSFROM (ROOT);
+         tst   %i0
+         bnz   destroy
+         nop
+           KALL(LSFNODE, LSFAOUT) KEYSTO (AOUT);
+           KALL(ROOT, Node_Swap+1) KEYSFROM (AOUT);
+           set   0x10000000, %l0
+           lduh  [%l0 + Elf32_numphdrs], %l1
+           cmp   %l1, 4
+           be    mapping
+           nop
+           cmp   %l1, 2
+           be    mapping
+           nop
+             ld   [%l0 + Elf32_start], %l2
+             KALL(DOMKEY, Domain_SwapMemory) KEYSFROM (BUILDER); /* just me */
+             KALL(SB, Bank_DestroyNode) KEYSFROM (ROOT); /* SELL NODE */
+/*            KALL(DOMKEY, DOMAINREPLACEMEMORY) CHARFROM(i2*4,4,R) KEYSFROM (AOUT); */
+             OC(Domain_ReplaceMemory)
+             XB(0x8c30C000)
+             NB(0x00000000)
+             PS2(18*4,4)     /* %l2 */
+             cjcc(0,0)
+
+/*             call cjcc1 */
+/*             nop        */
+/*             call exit  */
+/*             nop        */
+/* should not return */
+
+             ta   ST_KEYERROR
+ 
+  
+/*********************************************************************/
+/* THIS CODE IS BASED ON "BSD 4.3" STANDARDS AND NOT "88K" STANDARDS */
+/*  THE SIZE OF TEXT AND DATA SECTIONS SEEMS TO BE ROUNDED TO        */
+/*  8K.  DATA IS LOADED AT 128K BOUNDARIES                           */
+/*********************************************************************/ 
+mapping:
+         KALL (SB,Bank_CreatePage) KEYSTO(PAGE);    /* get stack page */
+         KALL (ROOT,Node_Swap+2) KEYSFROM(PAGE);    /* to memory */
+         set  0x20000F80, %sp
+         or   %i3, %g0, %l1  /*  oc,ord */
+         or   %i4, %g0, %l2
+         ld   [%l0 + Elf32_start], %l3
+         call buildls
+         nop
+
+         ta  3                                          /* need to empty reg windows on good stack */
+
+         KALL(ROOT, Node_Fetch+2) KEYSTO(PAGE);         /* get stack page back */
+         KALL(SB, Bank_DestroyPage) KEYSFROM(PAGE);     /* sell page */
+         KALL(DOMKEY, Domain_SwapMemory) KEYSFROM (BUILDER); /* PUT ME BACK */
+         KALL(SB, Bank_DestroyNode) KEYSFROM (ROOT);
+         KALL(DOMKEY, Domain_SwapKey+ROOT) KEYSFROM (REDROOT); /* PUT HERE */
+         or   %l1, %g0, %i3  /* oc */
+         or   %l2, %g0, %i4  /* ordinal */
+         set  0x9FFF80, %sp
+
+/* the 88K code put the same value in R14. I don't know why */
+
+/*         KALL(DOMKEY, DOMAINREPLACEMEMORY) CHARFROM(R22*4,4,R) KEYSFROM (ROOT); */
+         OC(Domain_ReplaceMemory)
+         XB(0x8c30E000)
+         NB(0x00000000)
+         PS2(19*4,4)     /* %l3 */
+         cjcc(0,0)
+
+/*         call cjcc1 */
+/*         nop        */
+/*         call exit  */
+/*         nop        */
+/* should not return */
+
+         ta   ST_KEYERROR
+ 
+/*  DESTROY -   CFSTART OBJECT NEVER COME HERE */
+/*          -   MAPPED OBJECT HAS REDROOT IN REDROOT */
+ 
+/*  LOOP THROUGH LSS4, FOR EACH LSS3 LOOP AND SELL ANY PAGE */
+/*  %i2 HAS RETURN CODE */
+destroy: 
+         or   %i2, %g0, %l2
+         KALL (SB,Bank_CreatePage) KEYSTO(PAGE);    /* get stack page */
+         KALL (ROOT,Node_Swap+2) KEYSFROM(PAGE);    /* to memory */
+         set  0x20000F80, %sp
+         call zapls
+         nop
+
+         KALL (ROOT,Node_Fetch+2) KEYSTO(PAGE);
+         KALL (SB,Bank_DestroyPage) KEYSFROM(PAGE);
+         KALL (DOMKEY, Domain_SwapMemory) KEYSFROM(BUILDER);  /* me */
+         KALL (SB, Bank_DestroyNode) KEYSFROM (ROOT);
+/*         KALL (DOMCRE, 8) CHARFROM(%l2*4,4,R) KEYSFROM (CALLER, SB); */
+         OC(8)
+         XB(0xCC602400)
+         NB(0x00000000)
+         PS2(18*4,4)       /* %l2 */
+         cjcc(0,0)
+
+/*         call cjcc1 */
+/*         nop        */
+/*         call exit  */
+/*         nop        */
+
+/* should not return */
+crash:
+         ta   ST_KEYERROR
+
+         .seg  ".data"
+db7:     .byte  7
+db5:     .byte  5
+db4:     .byte  4
+db3:     .byte  3

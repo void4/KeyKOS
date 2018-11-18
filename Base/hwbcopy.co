@@ -1,0 +1,116 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "bcopy_if.h"
+
+extern longlong_t	xdb_cc_ssar_get(void);
+extern void		xdb_cc_ssar_set(longlong_t src);
+extern longlong_t	xdb_cc_sdar_get(void);
+extern void		xdb_cc_sdar_set(longlong_t src);
+extern u_int		disable_traps(void);
+extern void		enable_traps(u_int psr_value);
+
+#define	SIGN_CHECK(card64)	((u_int)(card64 >> 32) & (1U << 31))
+
+/*
+ * Optional DEBUG if you're paranoid...
+ */
+
+/* #define	HWBCOPY_DEBUG */
+
+/*
+ * (physical) block scan, fill, & copy primitives
+ * these are a bit sensitive because they operate with traps disabled
+ */
+void
+hwbc_scan(u_int blks, pa_t src)
+{
+
+	/*
+	 * Yes, these outer while() loops are necessary.
+	 */
+	while (blks > 0) {
+		u_int psr = disable_traps();
+		for (; blks > 0; blks--) {
+			xdb_cc_ssar_set(src);
+			src += BLOCK_SIZE;
+		}
+		while (SIGN_CHECK(xdb_cc_ssar_get()) == 0) { }
+		enable_traps(psr);
+	}
+}
+
+void
+hwbc_fill(u_int blks, pa_t dest, pa_t pattern)
+{
+
+	while (blks > 0) {
+		u_int psr = disable_traps();
+		xdb_cc_ssar_set(pattern);
+		for (; blks > 0; blks--) {
+			xdb_cc_sdar_set(dest);
+			dest += BLOCK_SIZE;
+		}
+		while (SIGN_CHECK(xdb_cc_sdar_get()) == 0) { }
+		enable_traps(psr);
+	}
+}
+
+void
+hwbc_copy(u_int blks, pa_t src, pa_t dest)
+{
+
+	while (blks > 0) {
+		u_int psr = disable_traps();
+		for (; blks > 0; blks--) {
+			xdb_cc_ssar_set(src);
+			xdb_cc_sdar_set(dest);
+			src += BLOCK_SIZE;
+			dest += BLOCK_SIZE;
+		}
+		while (SIGN_CHECK(xdb_cc_ssar_get()) == 0) { }
+		while (SIGN_CHECK(xdb_cc_sdar_get()) == 0) { }
+		enable_traps(psr);
+	}
+}
+
+/*
+ * physical page/block - scan, fill, & copy primitives
+ */
+void
+hwpage_scan(u_int pfn)
+{
+	u_int blks = BLOCKS_PER_PAGE;
+	pa_t src = PFN_ENLARGE(pfn);
+
+	hwbc_scan(blks, src);
+}
+
+void
+hwpage_fill(u_int pfn, pa_t pattern)
+{
+	u_int blks = BLOCKS_PER_PAGE;
+	pa_t dest = PFN_ENLARGE(pfn);
+
+	hwbc_fill(blks, dest, pattern);
+}
+
+void
+hwpage_copy(u_int spfn, u_int dpfn)
+{
+	u_int blks = BLOCKS_PER_PAGE;
+	pa_t src = PFN_ENLARGE(spfn);
+	pa_t dest = PFN_ENLARGE(dpfn);
+
+	hwbc_copy(blks, src, dest);
+}
+
+void
+hwpcopy(u_int fromaddr, u_int toaddr)
+{
+	u_int blks = BLOCKS_PER_PAGE;
+	pa_t src = fromaddr;
+	pa_t dest = toaddr;
+
+	hwbc_copy(blks, src, dest);
+}

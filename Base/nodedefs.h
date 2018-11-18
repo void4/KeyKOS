@@ -1,0 +1,25 @@
+/* Please use PLIH to maintain this file */
+#define NODE__FETCH 0
+#define node__fetch 0
+#define NODE__SWAP 16
+#define node__swap 16
+#define NODE__COMPARE 38
+#define node__compare 38
+#define NODE__CLEAR 39
+#define node__clear 39
+#define NODE__DATA_BYTE 40
+#define node__data_byte 40
+#define NODE__MAKE_FETCH_KEY 32
+#define node__make_fetch_key 32
+#define NODE__MAKE_SEGMENT_KEY 33
+#define node__make_segment_key 33
+#define NODE__MAKE_METER_KEY 34
+#define node__make_meter_key 34
+#define NODE__MAKE_NODE_KEY 35
+#define node__make_node_key 35
+#define NODE__MAKE_SENSE_KEY 36
+#define node__make_sense_key 36
+#define NODE__MAKE_FRONTEND_KEY 37
+#define node__make_frontend_key 37
+#define NODE__WRITE_DATA 45
+#define node__write_data 45

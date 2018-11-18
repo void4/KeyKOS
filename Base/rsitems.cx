@@ -1,0 +1,16 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "item.h"
+#include "sysdefs.h"
+prim_info_t *
+def_initial_items()
+{ 
+  prim_info_t *prim_infop;
+
+  prim_infop = (prim_info_t *)malloc(sizeof(prim_info_t));
+
+  prim_infop->nodecnt = curr_node_cda;
+  prim_infop->plistcnt = curr_plist;
+  return prim_infop;
+}

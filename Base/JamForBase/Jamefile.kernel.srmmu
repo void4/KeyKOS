@@ -1,0 +1,8 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel srmmu ;
+
+UseKernelFlags ;
+SubDirCcFlags -D_KERNEL ;
+
+OLibrary srmmu : pagetab.c ;

@@ -1,0 +1,85 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "keykosasm.h"
+
+! KEY COMP=0;
+! KEY SB=1;
+! KEY CALLER=2;
+! KEY DOMKEY=3;
+! KEY PSB=4;
+! KEY METER=5;
+! KEY DOMCRE=6;
+
+       .seg ".text"
+
+       .type _start, #function
+       .global _start
+
+       .type crash, #function
+       .global crash
+       .type thaw, #function
+       .global thaw
+
+       .ascii "FACTORY "
+       .word  uwrapper
+       .word  title
+
+_start:   /* oc in %i3 ordinal in %i4 */
+        or %i3, %g0, %o0
+        or %i4, %g0, %o1
+        set 0x0FFFFF80,%sp
+        call uwrapper
+        nop
+   
+        ta ST_FLUSH_WINDOWS
+
+        clr %o1
+        clr %o2
+        clr %o3
+        clr %o4
+        clr %o5
+        clr %o7
+        clr %i0
+        clr %i1
+        clr %i2
+        clr %i3
+        clr %i4
+        clr %i5
+        clr %i6
+        clr %i7
+        clr %l0
+        clr %l1
+        clr %l2
+        clr %l3
+        clr %l4
+        clr %l5
+        clr %l6
+        clr %l7
+        clr %g1
+        clr %g2
+        clr %g3
+        clr %g4
+        clr %g5
+        clr %g6
+        clr %g7
+
+        set 0x0EFFFFc0,%sp
+        jmp %o0            /* go to dynamic loader */ 
+        nop
+
+thaw:
+        ta ST_FLUSH_WINDOWS
+        nop
+        set 2, %o0
+        set 0x0000ffff, %g1
+        ta  ST_SYSCALL
+        nop                         /* return is never here */
+
+crash:
+        ta ST_KEYERROR
+
+
+
+        .seg ".data"
+dum:    .byte 0

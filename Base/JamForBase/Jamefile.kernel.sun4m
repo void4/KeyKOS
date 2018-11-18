@@ -1,0 +1,12 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel sun4m ;
+
+UseKernelFlags ;
+# SubDirHdrs $(LOCATE_SOURCE) ;
+
+Main genassym : genassym.c ;
+GenFileContents assym.h : genassym ; 
+
+OLibrary sun4m : locore.s sun4m_asm.s traps.s 
+				 main.c fillsysinfo.c hardclk.c hwbcopy.c ;

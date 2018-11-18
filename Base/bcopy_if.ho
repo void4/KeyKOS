@@ -1,0 +1,26 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#ifndef _SYS_BCOPY_IF_H
+#define	_SYS_BCOPY_IF_H
+
+#include "types.h"
+#include "param.h"
+
+extern void hwbc_scan(u_int blks, pa_t src);
+extern void hwbc_fill(u_int blks, pa_t dest, pa_t pattern);
+extern void hwbc_copy(u_int blks, pa_t src, pa_t dest);
+extern void hwpage_scan(u_int pfn);
+extern void hwpage_fill(u_int pfn, pa_t pattern);
+extern void hwpage_copy(u_int spfn, u_int dpfn);
+extern void hwpcopy(u_int fromaddr, u_int toaddr);
+
+#define	BLOCK_SIZE		32		/* Must be a power of 2 */
+#define	BLOCK_MASK		(BLOCK_SIZE-1)
+#define	BLOCK_SIZE_SHIFT	5	/* log2(BLOCK_SIZE) */
+#define	BLOCKS_PER_PAGE		(PAGESIZE >> BLOCK_SIZE_SHIFT)
+#define	PFN_ENLARGE(pfn) 	((pa_t) pfn << PAGESHIFT)
+#define	ROUNDUP1(v, size)	((v) + ((size)-1) & ~((size-1)))
+#define	ROUNDUP2(a, size)	((caddr_t) \
+				(((u_int) (a) + (size)) & ~((size)-1)))
+#endif	/* _SYS_BCOPY_IF_H */

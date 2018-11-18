@@ -1,0 +1,1415 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+/* 
+ #include <sys/param.h>
+ #include <sys/conf.h>
+ #include <sys/sysmacros.h>
+ #include <sys/errno.h>
+ #include <sys/debug.h>
+ #include <sys/psw.h>
+ #include <sys/mmu.h>
+ #include <sys/pte.h>
+ #include <sys/devops.h>
+ #include <sys/sunddi.h>
+ #include <sys/ddi_impldefs.h>
+ #include <sys/ddi_implfuncs.h>
+ #include <sys/modctl.h>
+ #include <sys/cpu.h>
+ #include <sys/kmem.h>
+ #include <sys/cmn_err.h>
+ #include <vm/seg.h>
+ #include <sys/map.h>
+ #include <sys/mman.h>
+ #include <vm/hat.h>
+ #include <vm/as.h>
+ #include <vm/page.h>
+ #include <sys/autoconf.h>
+ #include <sys/vmmac.h>
+ #include <sys/avintr.h>
+ #include <sys/bt.h>
+
+ #include <vm/hat_srmmu.h>
+*/
+#include "types.h"
+#include "dditypes.h"
+#include "pte.h"
+#include "mmu.h"
+#include "iommu.h"
+#include "ddidmareq.h"
+#include "ddi_impldefs.h"
+#include "mp.h"
+
+u_int mmu_probe(caddr_t adr, int n){
+if(n) crash("What does that mean?");
+{int j = lda03(adr & ~0xfff);
+ if(!j) crash("Is this OK?");
+ return j;}
+
+/*
+static int iommunex_dma_map(dev_info_t *dip, dev_info_t *rdip,
+    struct ddi_dma_req *dmareq, ddi_dma_handle_t *handlep);
+
+static int iommunex_dma_mctl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, enum ddi_dma_ctlops request,
+    off_t *offp, u_int *lenp, caddr_t *objp, u_int cache_flags);
+*/
+/*
+ * protected by ddi_callback_mutex (in ddi_set_callback(),
+ * and in real_callback_run())
+ */
+static int dvma_call_list_id = 0;
+/*
+static int dma_reserve = ;
+*/
+static caddr_t dmaimplbase;		/* protected by dma_pool_lock */
+
+/*
+ * DMA routines
+ */
+
+/*
+ * Shorthand defines
+ */
+
+#define	DMAOBJ_PP_PP	dmao_obj.pp_obj.pp_pp
+#define	DMAOBJ_PP_OFF	dmao_obj.pp_obj.pp_offset
+#define	ALO		dma_lim->dlim_addr_lo
+#define	AHI		dma_lim->dlim_addr_hi
+#define	CMAX		dma_lim->dlim_cntr_max
+#define	OBJSIZE		dmareq->dmar_object.dmao_size
+#define	ORIGVADDR	dmareq->dmar_object.dmao_obj.virt_obj.v_addr
+#define	RED		((mp->dmai_rflags & DDI_DMA_REDZONE)? 1 : 0)
+#define	DIRECTION	(mp->dmai_rflags & DDI_DMA_RDWR)
+#define	PTECSIZE	(64)
+
+/*
+ * XXX: temporary
+ * XXX	what really needs to happen here is we need to move the
+ *	VME iocache stuff out into the sun4m VME nexus. It just doesn't
+ *	belong here, folks.
+ */
+/*
+extern struct hatops srmmu_hatops;
+extern void srmmu_vacsync(u_int);
+extern void flush_writebuffers(void);
+extern void pac_flushall(void);
+static void iommunex_vacsync(ddi_dma_impl_t *, u_long, int, u_int,
+				off_t *, u_int *);
+*/
+
+#ifdef DEBUG
+extern int sema_held(ksema_t *);
+#endif
+/*
+extern int impl_read_hwmap(struct as *, caddr_t, int, struct pte *, int);
+extern u_long getdvmapages(int, u_long, u_long, u_int, u_int, int);
+extern void putdvmapages(u_long, int);
+*/
+
+/* #define	DMADEBUG */
+#if defined(DMADEBUG) || defined(lint) || defined(__lint)
+int dmadebug;
+#else
+#define	dmadebug	0
+#endif	/* DMADEBUG */
+
+#define	DMAPRINTF			if (dmadebug) printf
+#define	DMAPRINT(x)			DMAPRINTF(x)
+#define	DMAPRINT1(x, a)			DMAPRINTF(x, a)
+#define	DMAPRINT2(x, a, b)		DMAPRINTF(x, a, b)
+#define	DMAPRINT3(x, a, b, c)		DMAPRINTF(x, a, b, c)
+#define	DMAPRINT4(x, a, b, c, d)	DMAPRINTF(x, a, b, c, d)
+#define	DMAPRINT5(x, a, b, c, d, e)	DMAPRINTF(x, a, b, c, d, e)
+#define	DMAPRINT6(x, a, b, c, d, e, f)	DMAPRINTF(x, a, b, c, d, e, f)
+
+
+extern  ddi_dma_impl_t *ddi_dma_impl_ptr;
+
+
+static int
+iommunex_dma_map( struct ddi_dma_req *dmareq, ddi_dma_handle_t *handlep)
+{
+	extern struct as kas;
+	auto struct pte stackptes[PTECSIZE + 1];
+	auto struct pte *allocpte;
+	register struct pte *ptep;
+	ddi_dma_lim_t *dma_lim = dmareq->dmar_limits;
+	register ddi_dma_impl_t *mp;
+	register u_int off;
+	struct as *as;
+	u_int size, align, pfn;
+	u_long addr, offset;
+	int npages, rval;
+	int memtype;
+	int naptes = 0;
+	iommu_pte_t *piopte;
+	int red;
+	u_int iom_flag;
+	u_long ioaddr;
+	struct hat *hat;
+	struct hment *hme;
+	dev_info_t *dip, rdip;
+	ptpe_t	pt;
+#define	start_padding		0
+#define	end_padding		0
+
+	DMAPRINT6("dma_map: %s (%s) hi %x lo %x min %x burst %x\n",
+	    (handlep)? "alloc" : "advisory", ddi_get_name(rdip), (int)AHI,
+	    (int)ALO, dma_lim->dlim_minxfer, dma_lim->dlim_burstsizes);
+
+	/*
+	 * If not an advisory call, get a dma record..
+	 */
+
+	if (handlep) {
+		mp = ddi_dma_impl_ptr;
+		if (mp == 0) {
+			rval = DDI_DMA_NORESOURCES;
+			goto bad;
+		}
+
+		/*
+		 * Save requestor's information
+		 */
+		mp->dmai_rdip = rdip;
+		mp->dmai_rflags = dmareq->dmar_flags & DMP_DDIFLAGS;
+		mp->dmai_minxfer = dma_lim->dlim_minxfer;
+		mp->dmai_burstsizes = dma_lim->dlim_burstsizes;
+		mp->dmai_object = dmareq->dmar_object;
+		mp->dmai_offset = 0;
+		mp->dmai_ndvmapages = 0;
+		mp->dmai_minfo = 0;
+	} else {
+		mp = (ddi_dma_impl_t *) 0;
+	}
+
+	/*
+	 * Validate range checks on dma limits
+	 */
+	if (dma_lim->dlim_burstsizes == 0) {
+		rval = DDI_DMA_NOMAPPING;
+		goto bad;
+	}
+
+	/*
+	 * Check sanity for hi and lo address limits
+	 */
+	if (AHI <= ALO) {
+		rval = DDI_DMA_NOMAPPING;
+		goto bad;
+	}
+
+	/*
+	 * The only valid address references we deal with here
+	 * are in the Kernel's address range. This is because
+	 * we are either going to map something across DVMA
+	 * or we have the ability to directly access a kernel
+	 * mapping (e.g., onboard ethernet on a sun4 and all
+	 * dma masters on a sun4c).
+	 */
+
+	if (AHI < IOMMU_DVMA_BASE) {
+		rval = DDI_DMA_NOMAPPING;
+		goto bad;
+	}
+
+	size = OBJSIZE;
+	off = size - 1;
+	if (off > CMAX) {
+		if ((dmareq->dmar_flags & DDI_DMA_PARTIAL) == 0) {
+			rval = DDI_DMA_TOOBIG;
+			goto bad;
+		}
+		size = CMAX + 1;
+	}
+	if (ALO + off > AHI || ALO + off < ALO) {
+		if (!((ALO + OBJSIZE == 0) && (AHI == (u_long) -1))) {
+			if ((dmareq->dmar_flags & DDI_DMA_PARTIAL) == 0) {
+				rval = DDI_DMA_TOOBIG;
+				goto bad;
+			}
+			size = min(AHI - ALO + 1, size);
+		}
+	}
+
+	/*
+	 * Validate the dma request.
+	 *
+	 * At the same time, determine whether or not the virtual address
+	 * of the object to be mapped for I/O is already mapped (and locked)
+	 * and addressable by the requestors dma engine.
+	 */
+	switch (dmareq->dmar_object.dmao_type) {
+	default:
+	case DMA_OTYP_PADDR:
+		/*
+		 * Not a supported type for this implementation
+		 */
+		rval = DDI_DMA_NOMAPPING;
+		goto bad;
+
+
+	case DMA_OTYP_VADDR:
+		addr = (u_long) dmareq->dmar_object.dmao_obj.virt_obj.v_addr;
+		offset = addr & MMU_PAGEOFFSET;
+		as = dmareq->dmar_object.dmao_obj.virt_obj.v_as;
+		if (as == (struct as *) 0)
+			as = &kas;
+		addr &= ~MMU_PAGEOFFSET;
+
+		/*
+		 * As a safety check and an optimization, check the entire
+		 * passed range for being of the same type of memory and
+		 * (usual case) all primary memory and at the same time,
+		 * fetch the first chunk of ptes that we will need for
+		 * doing any dma mapping. If the memory object is not all
+		 * of the same type, that is an error. If the memory object
+		 * is not primary memory, we will have to get clever here
+		 * and now.
+		 */
+
+		npages = mmu_btopr(OBJSIZE + offset);
+
+		pt.ptpe_int= mmu_probe ((caddr_t)addr, 0);
+
+		DMAPRINT4("dma_map: as %x addr %x off %x memtype %d\n",
+		    (int)as, (int)addr, (int)offset, memtype);
+
+
+			/*
+			 * memory. make sure we don't iocache iopb memory.
+			 */
+			if (addr >= (u_long)mmu_ptob(KNCMAP_BASE) &&
+			    addr < (u_long)mmu_ptob(
+			    KNCMAP_BASE + KNCMAP_SIZE) && mp) {
+				mp->dmai_rflags |= DDI_DMA_CONSISTENT;
+			}
+			/*
+			 * just up to 32 byte bursts to memory on sun4m
+			 */
+			if (!(dmareq->dmar_flags & DDI_DMA_SBUS_64BIT)) {
+				dma_lim->dlim_burstsizes &= 0x3F;
+			} else {
+				dma_lim->dlim_burstsizes &= 0x3F003F;
+			}
+			if (dma_lim->dlim_burstsizes == 0) {
+				rval = DDI_DMA_NOMAPPING;
+				goto bad;
+			}
+			if (mp)
+				mp->dmai_burstsizes = dma_lim->dlim_burstsizes;
+
+			break;
+
+			/*
+			 * Object is not primary memory. Call another function
+			 * to deal with this case. This function will check
+			 * the legality of such a transfer, and fiddle with
+			 * the dma handle, if appropriate, to finish setting
+			 * it up. In the case where specific bus address
+			 * values would go into a DMA cookie, the appropriate
+			 * nexus drivers will then be required to deal with
+			 * them. In the case where an MMU mapping is needed
+			 * for the device to device transfer, well, we'll see.
+			 */
+
+		break;
+	}
+
+	/*
+	 * At this point, we know for sure that we are going to need
+	 * to do some mapping. If this is an advisory call, we're done
+	 * because we already checked the legality of the DMA_OTYP_VADDR
+	 * case above.
+	 */
+
+	if (mp == 0) {
+		if (naptes) {
+			kmem_free((caddr_t)allocpte,
+			    naptes * sizeof (struct pte));
+		}
+		goto out;
+	}
+
+	/*
+	 * At this point, we know that we are doing dma to or from memory
+	 * that we have to allocate translation resources for and map.
+	 */
+
+	/*
+	 * Get the number of pages we need to allocate. If the request
+	 * is marked DDI_DMA_PARTIAL, do the work necessary to set this
+	 * up right. Up until now, npages is the total number of pages
+	 * needed to map the entire object. We may rewrite npages to
+	 * be the number of pages necessary to map a PTECSIZE window
+	 * onto the object (including any beginning offset).
+	 */
+
+	if (mp->dmai_rflags & DDI_DMA_PARTIAL) {
+		/*
+		 * If the size was rewritten above due to device dma
+		 * constraints, make sure that it still makes sense
+		 * to attempt anything. Also, in this case, the
+		 * ability to do a dma mapping at all predominates
+		 * over any attempt at optimizing the size of such
+		 * a mapping.
+		 *
+		 * XXX: Well, we don't really do any optimization here.
+		 * XXX: We have the device's dma speed (in kb/s), but
+		 * XXX: that is for some future microoptimization.
+		 */
+
+		if (size != OBJSIZE) {
+			/*
+			 * If the request is for partial mapping arrangement,
+			 * the device has to be able to address at least the
+			 * size of the window we are establishing.
+			 */
+			if (size < mmu_ptob(PTECSIZE + mmu_btopr(offset))) {
+				rval = DDI_DMA_NOMAPPING;
+				goto bad;
+			}
+			npages = mmu_btopr(size + offset);
+		}
+
+		/*
+		 * If the size requested is less than a moderate amt,
+		 * skip the partial mapping stuff- it's not worth the
+		 * effort.
+		 */
+		if (npages > PTECSIZE + 1) {
+			npages = PTECSIZE + mmu_btopr(offset);
+			size = mmu_ptob(PTECSIZE);
+			DMAPRINT4("dma_map: SZ %x pg %x sz %x ua %x\n",
+			    (int)OBJSIZE, npages, size, (int)(addr + offset));
+		} else {
+			mp->dmai_rflags ^= DDI_DMA_PARTIAL;
+		}
+	} else {
+		/*
+		 * We really need to have a running check
+		 * of the amount of dvma pages available,
+		 * but that is too hard. We hope that the
+		 * amount of space 'permanently' taken
+		 * up out of the beginning pool of dvma
+		 * pages is not significant.
+		 *
+		 * We give more slack to requestors who
+		 * cannot do partial mappings, but we
+		 * do not give them carte blanche.
+		 */
+		if (npages >= mmu_btop(IOMMU_DVMA_RANGE) - 0x40) {
+			rval = DDI_DMA_TOOBIG;
+			goto bad;
+		}
+	}
+
+	/*
+	 * Establish dmai_size to be the size of the
+	 * area we are mapping, not including any redzone,
+	 * but accounting for any offset we are starting
+	 * from. Note that this may be quite distinct from
+	 * the actual size of the object itself.
+	 *
+	 * NOTE: npages, size does NOT include the paddings
+	 *	 for IOC.
+	 */
+
+	mp->dmai_size = size;
+
+	/*
+	 * this records pages in IOMMU's view.
+	 */
+	mp->dmai_ndvmapages = npages;
+
+	/*
+	 * Okay- we have to do some mapping here. We either have
+	 * to produce an alias mapping for a passed virtual address,
+	 * or to produce a new mapping for a list of pages.
+	 *
+	 * Try and get a vac aligned DVMA mapping (if VAC_IOCOHERENT).
+	 */
+	align = (u_int) -1;
+	red = RED;
+
+	ioaddr = getdvmapages(npages + start_padding
+		+ end_padding + red, ALO, AHI,
+		(start_padding) ? align - IOMMU_PAGE_SIZE : align, CMAX,
+		(dmareq->dmar_fp == DDI_DMA_SLEEP) ? 1 : 0);
+
+	if (ioaddr == 0) {
+		if (dmareq->dmar_fp == DDI_DMA_SLEEP)
+			rval = DDI_DMA_NOMAPPING;
+		else
+			rval = DDI_DMA_NORESOURCES;
+		goto bad;
+	}
+
+	if (start_padding)
+		ioaddr += IOMMU_PAGE_SIZE;
+
+	/*
+	 * establish real virtual address for caller
+	 * This field is invariant throughout the
+	 * life of the mapping.
+	 */
+	mp->dmai_mapping = (u_long) (ioaddr + offset);
+	ASSERT((mp->dmai_mapping & ~CMAX) ==
+	    ((mp->dmai_mapping + (mp->dmai_size - 1)) & ~CMAX));
+
+	/*
+	 * At this point we have a range of virtual address allocated
+	 * with which we now have to map to the requested object.
+	 */
+
+	piopte = iommu_ptefind(ioaddr);
+	ASSERT(piopte != NULL);
+
+	iom_flag = (mp->dmai_rflags & DDI_DMA_READ) ?
+		IOM_WRITE : 0;
+
+	while (npages > 0) {
+		/* always starts with non-$ DVMA */
+		iom_flag &= ~IOM_CACHE;
+
+		/*
+		 * First, fetch the pte(s) we're interested in.
+		 */
+
+			pfn = MAKE_PFNUM(ptep);
+			/*
+			 * whether it's VAC or PAC, it works
+			 * the same way here.
+			 */
+			if (ptep->Cacheable)
+				iom_flag |= IOM_CACHE;
+#ifdef DEBUG
+		{
+			extern int use_cache;
+			/*
+			 * Despite all that .. maybe we don't want it
+			 */
+			if (!use_cache)
+				iom_flag &= ~IOM_CACHE;
+		}
+#endif /* DEBUG */
+
+		/*
+		 * And now map it in.
+		 *
+		 * Note that we cannot handle the case where IOMMU page size
+		 * is different from the system MMU's.  And if we support
+		 * multiple page sizes, this code may need some additional
+		 * attention.
+		 */
+		iommu_pteload(piopte, pfn, iom_flag);
+		piopte++;
+		ioaddr += IOMMU_PAGE_SIZE;
+
+		/*
+		 * adjust values of interest
+		 */
+		npages--;
+		ptep++;
+	}
+
+	/*
+	 * Establish the redzone, if required.
+	 */
+
+	if (red) {
+		iommu_pteunload(piopte);
+	}
+
+out:
+	/*
+	 * return success
+	 */
+
+	if (mp) {
+		DMAPRINT4("dma_map: handle %x flags %x kaddr %x size %x\n",
+		    (int)mp, mp->dmai_rflags, (int)mp->dmai_mapping,
+		    mp->dmai_size);
+		*handlep = (ddi_dma_handle_t) mp;
+		if (mp->dmai_rflags & DDI_DMA_PARTIAL) {
+			return (DDI_DMA_PARTIAL_MAP);
+		} else {
+			if (naptes) {
+				kmem_free((caddr_t) allocpte,
+				    naptes * sizeof (struct pte));
+				mp->dmai_minfo = (void *) 0;
+			}
+			return (DDI_DMA_MAPPED);
+		}
+	} else {
+		return (DDI_DMA_MAPOK);
+	}
+bad:
+	if (naptes) {
+		kmem_free((caddr_t) allocpte, naptes * sizeof (struct pte));
+	}
+
+	if (mp) {
+		kmem_fast_free(&dmaimplbase, (caddr_t) mp);
+	}
+	if (rval == DDI_DMA_NORESOURCES &&
+	    dmareq->dmar_fp != DDI_DMA_DONTWAIT) {
+		ddi_set_callback(dmareq->dmar_fp,
+		    dmareq->dmar_arg, &dvma_call_list_id);
+	}
+	return (rval);
+}
+
+/*
+ * For non-coherent caches (small4m), we always flush reads.
+ */
+#define	IOMMU_NC_FLUSH_READ(c, npages, mp, addr, cache_flags, offp, lenp)\
+{									\
+	if (((c & (CACHE_VAC|CACHE_IOCOHERENT)) == CACHE_VAC) && npages)\
+	    iommunex_vacsync(mp, addr, npages, cache_flags, offp, lenp);\
+	flush_writebuffers();						\
+	if ((c & (CACHE_PAC|CACHE_IOCOHERENT)) == CACHE_PAC) {		\
+		pac_flushall();						\
+	}								\
+}
+
+/*
+ * XXX	This ASSERT needs to be replaced by some code when machines
+ *	that trip over it appear.
+ */
+#define	IOMMU_NC_FLUSH_WRITE(c)						\
+{									\
+	ASSERT((c & CACHE_IOCOHERENT) || !(c & CACHE_WRITEBACK));	\
+}
+#if 0
+static int
+iommunex_dma_mctl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, enum ddi_dma_ctlops request,
+    off_t *offp, u_int *lenp,
+    caddr_t *objp, u_int cache_flags)
+{
+	register u_long addr, offset;
+	register int npages;
+	register ddi_dma_cookie_t *cp;
+	register ddi_dma_impl_t *mp = (ddi_dma_impl_t *) handle;
+	struct hat *hat;
+	struct hment *hme;
+
+	DMAPRINT1("dma_mctl: handle %x ", (int)mp);
+
+	switch (request) {
+	case DDI_DMA_FREE:
+	{
+		int red;
+
+		addr = mp->dmai_mapping & ~IOMMU_PAGE_OFFSET;
+		ASSERT(iommu_ptefind(addr) != NULL);
+		npages = mp->dmai_ndvmapages;
+
+		/*
+		 * flush IOC and do a free DDI_DMA_SYNC_FORCPU.
+		 */
+		if (mp->dmai_rflags & DDI_DMA_READ) {
+			IOMMU_NC_FLUSH_READ(cache, npages, mp, addr,
+						cache_flags, offp, lenp);
+		} else {
+			IOMMU_NC_FLUSH_WRITE(cache);
+		}
+
+		if (npages)
+			iommu_unload(addr, npages);
+
+		red = RED;
+
+		if (mp->dmai_minfo) {
+			u_long addr;
+			u_int naptes;
+
+			addr = (u_long) mp->dmai_object.
+				    dmao_obj.virt_obj.v_addr;
+			naptes = mmu_btopr(mp->dmai_object.dmao_size +
+				    (addr & MMU_PAGEOFFSET));
+			kmem_free((caddr_t)mp->dmai_minfo,
+			    naptes * sizeof (struct pte));
+		}
+
+		if (npages) {
+			putdvmapages((start_padding) ?
+			    addr - IOMMU_PAGE_SIZE : addr,
+			    npages + start_padding + end_padding + red);
+		}
+
+		/*
+		 * put impl struct back on free list
+		 */
+		kmem_fast_free(&dmaimplbase, (caddr_t)mp);
+
+		/*
+		 * Now that we've freed some resources,
+		 * if there is anybody waiting for it
+		 * try and get them going.
+		 */
+		if (dvma_call_list_id != 0) {
+			ddi_run_callback(&dvma_call_list_id);
+		}
+		break;
+	}
+
+	case DDI_DMA_SYNC:
+	{
+		DMAPRINT("sync\n");
+		addr = mp->dmai_mapping & ~IOMMU_PAGE_OFFSET;
+		ASSERT(iommu_ptefind(addr) != NULL);
+		npages = mp->dmai_ndvmapages;
+
+		if ((cache_flags == DDI_DMA_SYNC_FORCPU) ||
+			(cache_flags == DDI_DMA_SYNC_FORKERNEL)) {
+			if (mp->dmai_rflags & DDI_DMA_READ) {
+
+				IOMMU_NC_FLUSH_READ(cache, npages, mp, addr,
+					cache_flags, offp, lenp);
+			} else {
+				IOMMU_NC_FLUSH_WRITE(cache);
+			}
+		} else if (cache_flags == DDI_DMA_SYNC_FORDEV) {
+		}
+		break;
+	}
+
+	case DDI_DMA_HTOC:
+		/*
+		 * Note that we are *not* cognizant of partial mappings
+		 * at this level. We only support offsets for cookies
+		 * that would then stick within the current mapping for
+		 * a device.
+		 *
+		 * XXX: should we return an error if the resultant cookie
+		 * XXX: is less than minxfer?
+		 */
+		DMAPRINT3("htoc off %x mapping %x size %x\n",
+		    (int) *offp, (int)mp->dmai_mapping, mp->dmai_size);
+		addr = (u_long) *offp;
+		if (addr >= (u_long) mp->dmai_size) {
+			return (DDI_FAILURE);
+		}
+		cp = (ddi_dma_cookie_t *) objp;
+		cp->dmac_notused = 0;
+		cp->dmac_address = (mp->dmai_mapping + addr);
+		cp->dmac_size =
+		    mp->dmai_mapping + mp->dmai_size - cp->dmac_address;
+		cp->dmac_type = 0;
+		break;
+
+	case DDI_DMA_KVADDR:
+		DMAPRINT("kvaddr not supported\n");
+		return (DDI_FAILURE);
+
+	case DDI_DMA_NEXTWIN:
+	{
+		auto struct pte local;
+		register struct pte *ptep;
+		register ddi_dma_win_t *owin, *nwin;
+		register page_t *pp;
+		u_long winsize, newoff, flags;
+		int vac_still_aliased;
+		iommu_pte_t *piopte;
+		u_int iom_flag;
+		u_int pfn;
+
+		mp = (ddi_dma_impl_t *) handle;
+		owin = (ddi_dma_win_t *) offp;
+		nwin = (ddi_dma_win_t *) objp;
+		if (mp->dmai_rflags & DDI_DMA_PARTIAL) {
+			if (*owin == NULL) {
+				DMAPRINT("nextwin: win == NULL\n");
+				mp->dmai_offset = 0;
+				*nwin = (ddi_dma_win_t) mp;
+				return (DDI_SUCCESS);
+			}
+
+			offset = mp->dmai_mapping & IOMMU_PAGE_OFFSET;
+			winsize = iommu_ptob(mp->dmai_ndvmapages -
+				iommu_btopr(offset));
+			newoff = mp->dmai_offset + winsize;
+			if (newoff > mp->dmai_object.dmao_size -
+				mp->dmai_minxfer) {
+				return (DDI_DMA_DONE);
+			}
+
+			addr = mp->dmai_mapping & ~IOMMU_PAGE_OFFSET;
+			ASSERT(iommu_ptefind(addr) != NULL);
+			npages = mp->dmai_ndvmapages;
+
+			/*
+			 * flush IOC and do a free DDI_DMA_SYNC_FORCPU.
+			 */
+			if (mp->dmai_rflags & DDI_DMA_READ) {
+				IOMMU_NC_FLUSH_READ(cache, npages, mp, addr,
+					cache_flags, offp, lenp);
+			} else {
+				IOMMU_NC_FLUSH_WRITE(cache);
+			}
+
+			if (npages)
+				iommu_unload(addr, npages);
+
+			mp->dmai_offset = newoff;
+			mp->dmai_size = mp->dmai_object.dmao_size - newoff;
+			mp->dmai_size = MIN(mp->dmai_size, winsize);
+
+			if (mp->dmai_object.dmao_type == DMA_OTYP_VADDR) {
+				extern int vac_mask;
+
+				ptep = (struct pte *) mp->dmai_minfo;
+				ASSERT(ptep != NULL);
+				ptep = ptep + (newoff >> MMU_PAGESHIFT);
+
+				if (vac)
+					vac_still_aliased = ((u_int)
+				    (mp->dmai_object.dmao_obj.virt_obj.v_addr
+				    + newoff) & vac_mask) ==
+					(mp->dmai_mapping & vac_mask);
+
+			DMAPRINT2("dma_mctl: remap newoff %x pte idx %d\n",
+			    (int)newoff, (int)(newoff >> MMU_PAGESHIFT));
+
+				pp = (page_t *) 0;
+			} else {
+				ptep = &local;
+				pp = mp->dmai_object.DMAOBJ_PP_PP;
+				flags = 0;
+				while (flags < newoff) {
+					ASSERT(SEMA_HELD(&pp->p_iolock));
+					pp = pp->p_next;
+					flags += MMU_PAGESIZE;
+				}
+			}
+
+			addr = mp->dmai_mapping;
+			npages = mmu_btopr(mp->dmai_size +
+				    (addr & MMU_PAGEOFFSET));
+
+			DMAPRINT1("dma_mctl: remapping %d pages\n", npages);
+
+			piopte = iommu_ptefind(addr);
+			ASSERT(piopte != NULL);
+
+			iom_flag = (mp->dmai_rflags & DDI_DMA_READ) ?
+				IOM_WRITE : 0;
+
+			while (npages > 0) {
+			    iom_flag &= ~IOM_CACHE;
+
+			    if (pp) {
+				ASSERT(SEMA_HELD(&pp->p_iolock));
+				pfn = page_pptonum(pp);
+				if (vac) {
+					if (pp->p_mapping != NULL &&
+					    !PP_ISNC(pp)) {
+
+						extern int vac_mask;
+
+						hat_mlist_enter(pp);
+						for (hme = pp->p_mapping; hme;
+						    hme = hme->hme_next) {
+							hat =
+							    &hats[hme->hme_hat];
+							if (hat->hat_op ==
+							    &srmmu_hatops)
+								break;
+						}
+
+						if (hme != NULL) {
+						if (((u_int) hmetovaddr(
+						    hme) & vac_mask)
+						    == (addr & vac_mask)) {
+							iom_flag |= IOM_CACHE;
+						} else {
+							/*
+							 * NOTE: this is the
+							 * case where the page
+							 * is marked as $able
+							 * in SRMMU but we can
+							 * not alias it on
+							 * the IOMMU.
+							 * We have to flush out
+							 * the cache and do a
+							 * non-$ DVMA on this
+							 * page.
+							 */
+							srmmu_vacsync(pfn);
+						}
+						}
+						hat_mlist_exit(pp);
+					}
+				} else if (!PP_ISNC(pp))
+					iom_flag |= IOM_CACHE;
+			    } else {
+				pfn = MAKE_PFNUM(ptep);
+				if (ptep->Cacheable) {
+					if (vac) {
+						if (vac_still_aliased)
+							iom_flag |= IOM_CACHE;
+						else {
+							/*
+							 * Oops, it's no longer
+							 * vac aliased.
+							 */
+							srmmu_vacsync(pfn);
+						}
+					} else
+						iom_flag |= IOM_CACHE;
+				}
+			    }
+
+			    iommu_pteload(piopte, pfn, iom_flag);
+			    piopte++;
+			    addr += IOMMU_PAGE_SIZE;
+
+			    npages--;
+			    if (pp) {
+				pp = pp->p_next;
+			    } else {
+				ptep++;
+			    }
+			}
+		} else {
+			DMAPRINT("nextwin: no partial mapping\n");
+			if (*owin != NULL) {
+				return (DDI_DMA_DONE);
+			}
+			mp->dmai_offset = 0;
+			*nwin = (ddi_dma_win_t) mp;
+		}
+		break;
+	}
+
+	case DDI_DMA_NEXTSEG:
+	{
+		register ddi_dma_seg_t *oseg, *nseg;
+
+		DMAPRINT("nextseg:\n");
+
+		oseg = (ddi_dma_seg_t *) lenp;
+		if (*oseg != NULL) {
+			return (DDI_DMA_DONE);
+		} else {
+			nseg = (ddi_dma_seg_t *) objp;
+			*nseg = *((ddi_dma_seg_t *) offp);
+		}
+		break;
+	}
+
+	case DDI_DMA_SEGTOC:
+	{
+		register ddi_dma_seg_impl_t *seg;
+
+		seg = (ddi_dma_seg_impl_t *) handle;
+		cp = (ddi_dma_cookie_t *) objp;
+		cp->dmac_notused = 0;
+		cp->dmac_address = seg->dmai_mapping;
+		cp->dmac_size = *lenp = seg->dmai_size;
+		cp->dmac_type = 0;
+		*offp = seg->dmai_offset;
+		break;
+	}
+
+	case DDI_DMA_MOVWIN:
+	{
+		auto struct pte local;
+		register struct pte *ptep;
+		register page_t *pp;
+		u_long winsize, newoff, flags;
+		int vac_still_aliased;
+		iommu_pte_t *piopte;
+		u_int iom_flag;
+		u_int pfn;
+
+		offset = mp->dmai_mapping & IOMMU_PAGE_OFFSET;
+		winsize = iommu_ptob(mp->dmai_ndvmapages - iommu_btopr(offset));
+
+		DMAPRINT3("movwin off %x len %x winsize %x\n", (int)*offp,
+		    *lenp, (int)winsize);
+
+		if ((mp->dmai_rflags & DDI_DMA_PARTIAL) == 0) {
+			return (DDI_FAILURE);
+		}
+
+		if (*lenp != (u_int) -1 && *lenp != winsize) {
+			DMAPRINT("bad length\n");
+			return (DDI_FAILURE);
+		}
+		newoff = (u_long) *offp;
+		if (newoff & (winsize - 1)) {
+			DMAPRINT("bad off\n");
+			return (DDI_FAILURE);
+		}
+
+		if (newoff == mp->dmai_offset) {
+			/*
+			 * Nothing to do...
+			 */
+			break;
+		}
+
+		/*
+		 * Check out new address...
+		 */
+		if (newoff > mp->dmai_object.dmao_size - mp->dmai_minxfer) {
+			DMAPRINT("newoff out of range\n");
+			return (DDI_FAILURE);
+		}
+
+		/*
+		 * Be nice, do a SYNC_FORCPU then unload the old mapping.
+		 *
+		 * [This isn't a matter of "niceness," it's part
+		 * of the specification of 'partial' DMA mappings.]
+		 */
+		addr = mp->dmai_mapping & ~IOMMU_PAGE_OFFSET;
+		ASSERT(iommu_ptefind(addr) != NULL);
+		npages = mp->dmai_ndvmapages;
+
+		/*
+		 * flush IOC and do a free DDI_DMA_SYNC_FORCPU.
+		 */
+		if (mp->dmai_rflags & DDI_DMA_READ) {
+
+			IOMMU_NC_FLUSH_READ(cache, npages, mp, addr,
+				cache_flags, offp, lenp);
+		} else {
+			IOMMU_NC_FLUSH_WRITE(cache);
+		}
+
+		if (npages)
+			iommu_unload(addr, npages);
+
+		mp->dmai_offset = newoff;
+		mp->dmai_size = mp->dmai_object.dmao_size - newoff;
+		mp->dmai_size = MIN(mp->dmai_size, winsize);
+
+		if (mp->dmai_object.dmao_type == DMA_OTYP_VADDR) {
+			extern int vac_mask;
+
+			ptep = (struct pte *) mp->dmai_minfo;
+			ASSERT(ptep != NULL);
+			ptep = ptep + (newoff >> MMU_PAGESHIFT);
+
+			if (vac)
+				vac_still_aliased = ((u_int)
+				    (mp->dmai_object.dmao_obj.virt_obj.v_addr
+				    + newoff) & vac_mask) ==
+					(mp->dmai_mapping & vac_mask);
+
+			DMAPRINT2("dma_mctl: remap newoff %x pte idx %d\n",
+			    (int)newoff, (int)(newoff >> MMU_PAGESHIFT));
+			pp = (page_t *) 0;
+		} else {
+			ptep = &local;
+			pp = mp->dmai_object.DMAOBJ_PP_PP;
+			flags = 0;
+			while (flags < newoff) {
+				ASSERT(SEMA_HELD(&pp->p_iolock));
+				pp = pp->p_next;
+				flags += MMU_PAGESIZE;
+			}
+		}
+
+		/*
+		 * The original page offset is always held in dmai_mapping
+		 */
+		addr = mp->dmai_mapping;
+		npages = mmu_btopr(mp->dmai_size + (addr & MMU_PAGEOFFSET));
+
+		DMAPRINT1("dma_mctl: remapping %d pages\n", npages);
+
+		piopte = iommu_ptefind(addr);
+		ASSERT(piopte != NULL);
+
+		iom_flag = (mp->dmai_rflags & DDI_DMA_READ) ?
+			IOM_WRITE : 0;
+
+		while (npages > 0) {
+			/* always starts with non-$ DVMA */
+			iom_flag &= ~IOM_CACHE;
+
+			/*
+			 * First, fetch the pte(s) we're interested in.
+			 */
+			if (pp) {
+				/*
+				 * We're breaking the rules here a bit by not
+				 * holding the hat lock while looking at the
+				 * p_mapping and p_nrm fields of the page
+				 * structure.
+				 *
+				 * However, if we've got this far, the pages
+				 * are locked down for DMA, so we're pretty
+				 * confident that things aren't going to move
+				 * around.
+				 */
+				ASSERT(SEMA_HELD(&pp->p_iolock));
+				pfn = page_pptonum(pp);
+				if (vac) {
+					if (pp->p_mapping != NULL &&
+					    !PP_ISNC(pp)) {
+
+						extern int vac_mask;
+
+						hat_mlist_enter(pp);
+
+						for (hme = pp->p_mapping; hme;
+						    hme = hme->hme_next) {
+							hat =
+							    &hats[hme->hme_hat];
+							if (hat->hat_op ==
+							    &srmmu_hatops)
+								break;
+						}
+
+						if (hme != NULL) {
+						if (((u_int) hmetovaddr(
+						    hme) & vac_mask)
+						    == (addr & vac_mask)) {
+							iom_flag |= IOM_CACHE;
+						} else {
+							/*
+							 * NOTE: this is the
+							 * case where the page
+							 * is marked as $able
+							 * in SRMMU but we can
+							 * not alias it on
+							 * the IOMMU.
+							 * We have to flush out
+							 * the cache and do a
+							 * non-$ DVMA on this
+							 * page.
+							 */
+							srmmu_vacsync(pfn);
+						}
+						}
+						hat_mlist_exit(pp);
+					}
+				} else if (!PP_ISNC(pp))
+					iom_flag |= IOM_CACHE;
+			} else {
+				pfn = MAKE_PFNUM(ptep);
+				if (ptep->Cacheable) {
+					if (vac) {
+						if (vac_still_aliased)
+							iom_flag |= IOM_CACHE;
+						else {
+							/*
+							 * Oops, it's no longer
+							 * vac aliased.
+							 */
+							srmmu_vacsync(pfn);
+						}
+					} else
+						iom_flag |= IOM_CACHE;
+				}
+			}
+
+#ifdef DEBUG
+			{
+				extern int use_cache;
+				/*
+				 * Despite all that .. maybe we don't want it
+				 */
+				if (!use_cache)
+					iom_flag &= ~IOM_CACHE;
+			}
+#endif /* DEBUG */
+
+			/*
+			 * And now map it in.
+			 *
+			 * Note that we cannot handle the case where IOMMU page
+			 * size is different from the system MMU's.  And if we
+			 * support multiple pages sizes, this code may need
+			 * some additional attention.
+			 */
+			iommu_pteload(piopte, pfn, iom_flag);
+			piopte++;
+			addr += IOMMU_PAGE_SIZE;
+
+			/*
+			 * adjust values of interest
+			 */
+			npages--;
+			if (pp) {
+				pp = pp->p_next;
+			} else {
+				ptep++;
+			}
+		}
+
+		if ((cp = (ddi_dma_cookie_t *) objp) != 0) {
+			cp->dmac_notused = 0;
+			cp->dmac_address = mp->dmai_mapping;
+			cp->dmac_size = mp->dmai_size;
+			cp->dmac_type = 0;
+		}
+		*offp = (off_t) newoff;
+		*lenp = (u_int) winsize;
+		break;
+	}
+
+	case DDI_DMA_REPWIN:
+		if ((mp->dmai_rflags & DDI_DMA_PARTIAL) == 0) {
+			DMAPRINT("repwin fail\n");
+			return (DDI_FAILURE);
+		}
+		*offp = (off_t) mp->dmai_offset;
+		addr = mp->dmai_ndvmapages -
+		    iommu_btopr(mp->dmai_mapping & IOMMU_PAGE_OFFSET);
+		*lenp = (u_int) mmu_ptob(addr);
+		DMAPRINT2("repwin off %x len %x\n", (int)mp->dmai_offset,
+		    mp->dmai_size);
+		break;
+
+	case DDI_DMA_GETERR:
+		DMAPRINT("geterr\n");
+		break;
+
+	case DDI_DMA_COFF:
+		cp = (ddi_dma_cookie_t *) offp;
+		addr = cp->dmac_address;
+		if (addr < mp->dmai_mapping ||
+		    addr >= mp->dmai_mapping + mp->dmai_size)
+			return (DDI_FAILURE);
+		*objp = (caddr_t) (addr - mp->dmai_mapping);
+		DMAPRINT3("coff off %x mapping %x size %x\n",
+		    (int)*objp, (int)mp->dmai_mapping, mp->dmai_size);
+		break;
+/*
+	case DDI_DMA_RESERVE:
+	{
+		struct ddi_dma_req *dmareqp;
+		ddi_dma_lim_t *dma_lim;
+		ddi_dma_handle_t *handlep;
+		u_int np, dvma_pfn;
+		u_long ioaddr;
+
+		dmareqp = (struct ddi_dma_req *) offp;
+		dma_lim = dmareqp->dmar_limits;
+		if (dma_lim->dlim_burstsizes == 0) {
+			return (DDI_DMA_BADLIMITS);
+		}
+		if ((AHI <= ALO) || (AHI < IOMMU_DVMA_BASE)) {
+			return (DDI_DMA_BADLIMITS);
+		}
+		np = dmareqp->dmar_object.dmao_size;
+		if (np > dma_reserve) {
+			return (DDI_DMA_NORESOURCES);
+		}
+		dma_reserve -= np;
+		mp = (ddi_dma_impl_t *) kmem_fast_zalloc(&dmaimplbase,
+		    sizeof (*mp), 2, KM_SLEEP);
+		ASSERT(mp);
+		mp->dmai_rdip = rdip;
+		mp->dmai_minxfer = dma_lim->dlim_minxfer;
+		mp->dmai_burstsizes = dma_lim->dlim_burstsizes;
+		if (!vac) {
+			ioaddr = getdvmapages(np, ALO, AHI, (u_int) -1,
+					CMAX, 1);
+			if (ioaddr == 0) {
+				dma_reserve += np;
+				kmem_fast_free(&dmaimplbase, (caddr_t) mp);
+				return (DDI_DMA_NOMAPPING);
+			}
+			dvma_pfn = iommu_btop(ioaddr - IOMMU_DVMA_BASE);
+			mp->dmai_mapping = (u_long) dvma_pfn;
+			mp->dmai_rflags = DMP_FAST;
+		}
+		mp->dmai_ndvmapages = np;
+		handlep = (ddi_dma_handle_t *) objp;
+		*handlep = (ddi_dma_handle_t) mp;
+		break;
+	}
+	case DDI_DMA_RELEASE:
+	{
+		if (!vac) {
+			u_long ioaddr, dvma_pfn;
+
+			dvma_pfn = mp->dmai_mapping;
+			ioaddr = iommu_ptob(dvma_pfn) + IOMMU_DVMA_BASE;
+			putdvmapages(ioaddr, mp->dmai_ndvmapages);
+			dma_reserve += mp->dmai_ndvmapages;
+		}
+		kmem_fast_free(&dmaimplbase, (caddr_t) mp);
+
+		if (dvma_call_list_id != 0) {
+			ddi_run_callback(&dvma_call_list_id);
+		}
+		break;
+	}
+*/
+	default:
+		DMAPRINT1("unknown 0x%x\n", request);
+		return (DDI_FAILURE);
+	}
+	return (DDI_SUCCESS);
+}
+
+static int
+iommunex_report_dev(dev_info_t *dip, dev_info_t *rdip)
+{
+	register int i, n;
+	register dev_info_t *pdev;
+	extern int impl_bustype(u_int);
+
+#ifdef lint
+	dip = dip;
+#endif
+
+	if (DEVI_PD(rdip) == NULL)
+		return (DDI_FAILURE);
+
+	pdev = (dev_info_t *)DEVI(rdip)->devi_parent;
+	prom_printf ("?%s%d at %s%d",
+	    DEVI(rdip)->devi_name, DEVI(rdip)->devi_instance,
+	    DEVI(pdev)->devi_name, DEVI(pdev)->devi_instance);
+
+	for (i = 0, n = sparc_pd_getnreg(rdip); i < n; i++) {
+
+		register struct regspec *rp = sparc_pd_getreg(rdip, i);
+		register char *name;
+
+		if (i == 0)
+			prom_printf("?: ");
+		else
+			prom_printf("? and ");
+
+		switch (impl_bustype(PTE_BUSTYPE_PFN(rp->regspec_bustype,
+		    mmu_btop(rp->regspec_addr)))) {
+
+		case BT_OBIO:
+			name = "obio";
+			break;
+
+		default:
+			prom_printf("?space %x offset %x",
+			    rp->regspec_bustype, rp->regspec_addr);
+			continue;
+		}
+		prom_printf("?%s 0x%x", name, rp->regspec_addr);
+	}
+
+	/*
+	 * We'd report interrupts here if any of our immediate
+	 * children had any.
+	 */
+	prom_printf("?\n");
+	return (DDI_SUCCESS);
+}
+
+static int
+iommunex_ctlops(dev_info_t *dip, dev_info_t *rdip, ddi_ctl_enum_t op,
+    void *a, void *r)
+{
+	int err;
+
+	switch (op) {
+
+	default:
+		return (ddi_ctlops(dip, rdip, op, a, r));
+
+	case DDI_CTLOPS_REPORTDEV:
+		return (iommunex_report_dev(dip, rdip));
+
+	case DDI_CTLOPS_DVMAPAGESIZE:
+		*(u_long *)r = IOMMU_PAGE_SIZE;
+		return (DDI_SUCCESS);
+
+	/*
+	 * XXX	Bugid 1087610 - we need to deal with DDI_CTLOPS_PTOB etc.
+	 * XXX	At the risk of sounding like a broken record, this stuff
+	 *	belongs in the VME nexus.
+	 */
+	}
+}
+
+static void
+iommunex_vacsync(ddi_dma_impl_t *mp, u_long ioaddr, int npages,
+	u_int cache_flags, off_t *offp, u_int *lenp)
+{
+
+	page_t *pp;
+	u_int pfn;
+	register u_int offset, length, addr, endmap;
+
+	switch (mp->dmai_object.dmao_type) {
+
+	case DMA_OTYP_VADDR:
+		/*
+		 * This indicates that the object was mapped
+		 * non-cached, so we needn't flush it.
+		 */
+		if (mp->dmai_rflags & DDI_DMA_CONSISTENT)
+			break;
+
+		/*
+		 * If object vaddr is below KERNELBASE then we need to
+		 * flush in the correct object context. Also, if the type
+		 * of flush is not FORKERNEL then there may be more than
+		 * one mapping for this object.  In either case, we must
+		 * search for and flush all mappings.
+		 */
+		if ((mp->dmai_object.dmao_obj.virt_obj.v_addr <
+			(caddr_t)KERNELBASE) ||
+			(cache_flags != DDI_DMA_SYNC_FORKERNEL)) {
+
+			while (npages-- > 0) {
+				ASSERT(iommu_ptefind(ioaddr) != NULL);
+				pfn = IOMMU_MK_PFN(iommu_ptefind(ioaddr));
+				pp = page_numtopp_nolock(pfn);
+				ASSERT(pp != (page_t *)NULL);
+				if (pp->p_mapping != NULL && !PP_ISNC(pp)) {
+					hat_mlist_enter(pp);
+					srmmu_vacsync(pfn);
+					hat_mlist_exit(pp);
+				}
+				ioaddr += MMU_PAGESIZE;
+			}
+		} else {
+
+			offset = (u_long)*offp;
+			length = (u_long)*lenp;
+
+			addr = mp->dmai_mapping + offset;
+			endmap = mp->dmai_mapping + mp->dmai_size;
+
+			if ((length == 0) || (length == (u_int) -1) ||
+			    ((mp->dmai_mapping + offset + length) > endmap))
+				length = endmap - addr;
+
+			vac_flush(mp->dmai_object.dmao_obj.virt_obj.v_addr
+					+ offset, length);
+		}
+		break;
+
+	case DMA_OTYP_PAGES:
+
+		pp = mp->dmai_object.DMAOBJ_PP_PP;
+		while (npages-- > 0) {
+			pfn = page_pptonum(pp);
+			ASSERT(pp != (page_t *)NULL);
+			ASSERT(SEMA_HELD(&pp->p_iolock));
+			if (pp->p_mapping != NULL && !PP_ISNC(pp)) {
+				hat_mlist_enter(pp);
+				srmmu_vacsync(pfn);
+				hat_mlist_exit(pp);
+			}
+			pp = pp->p_vpnext;
+		}
+		break;
+
+	case DMA_OTYP_PADDR:
+		/* not support by IOMMU nexus */
+	default:
+		break;
+	}
+}
+#endif /* net yet needed */

@@ -1,0 +1,20 @@
+<title>Building Keykos on Mac</title>
+This is to see if the sources can be built.
+It is not an attempt to make them run on Mac.
+<p>See <a href=../../../code/Jam.html>this</a> about Jam on Mac.
+<p>“unzip main.zip” produces directories “__MACOSX” and “main”.
+I don’t know what that’s all about.
+There is little of interest in __MACOSX.
+The content of main is plausible.
+<p>I “cd main” and “jam”.
+The first problem is that this version of gcc does not know the “-mv8” option which directs the compiler to produce SPARC code for model v8 SPARCs.
+This is no surprise.
+I delete line “CCFLAGS = -mv8 ;” and subsequent text “-mv8” from Jamrules.
+<p>Source file src/kernel/sun4m/genassym.c wants header keyh.h .
+src/include/sparc/keyh.h is the right file, I think.
+I don't see the command line for gcc.
+I guess I must learn some Jam.
+<p>I remember thinking that the tree of .c files was poorly organized.
+This was a result of shifting concepts of modularity over several years.
+I might try a flat directory for each of <ul><li>kernel<li>domains<li>tools</ul>
+Tools are programs to support keykos that run outside keykos.

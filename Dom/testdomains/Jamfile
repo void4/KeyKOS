@@ -1,0 +1,46 @@
+# VERSION $ID: $
+
+SubDir TOP src domains testdomains ;
+
+UseDomainFlags ; 
+
+rule DomainY {
+    local _t = [ DomainCommon $(<) : $(>) ] ;
+    LINKLIBS on $(_t) = -L /netopt/gnu/lib/gcc-lib/sparc-sun-solaris2.5/2.7.2.2 -lgcc ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    DomainFilterLink $(_t) : bstart$(SUFOBJ) $(_s:S=$(SUFOBJ)) ;
+}
+rule DomainsY {
+	local _i ;
+	for _i in $(<) {
+		DomainY $(_i:B) : $(_i) ;
+	}
+}
+
+local DOMAINS1 = fetest.ck availtest.ck switcher.ck ;
+local DOMAINSY = clockc.ck stackt.ck join.ck joinD.ck Lorentz.ck ;
+
+Domains1 $(DOMAINS1) ;
+DomainsY $(DOMAINSY) ;
+
+MainAsDomain hello : hello.c ;
+MainAsDomain sigtest : sigtest.c ;
+MainAsDomain lwptest : lwptest.c ;
+MainAsDomain threadtest : threadtest.c ;
+MainLinkFlags [ FGristFiles threadtest ] : -lthread ;
+
+local CMDS = clockc clockf clocktc diag fetest java join joinD kvm Lorentz
+	 lwptest membug1 newkvm sigtest stackt testunix ukeeperf switcherf tmmk ;
+
+local TEST_DOMAINS = $(DOMAINS1) $(DOMAINSY) 
+		hello sigtest lwptest threadtest ;
+
+Tarseg RootDir : $(CMDS).cmd classes java kvm ;
+Tarseg RootDir : $(TEST_DOMAINS:S=$(SUFEXE)) ;
+
+ZipLib foo.zip : stackt stackt.ck stackt.cmd ;
+
+SEARCH_SOURCE += $(TOP)/lib/root ;
+ZipLib root.zip : etc usr ;
+
+Tarseg Init : root.zip ;

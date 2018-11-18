@@ -1,0 +1,5 @@
+#ident "@(#)Mapfile	1.3 08 Mar 1995 13:37:47 %n%"
+
+textdata	= LOAD ?RX V0x00000000 A0x1000;
+textdata	: $PROGBITS ?A;
+textdata	: $NOBITS ?A;

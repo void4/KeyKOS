@@ -1,0 +1,66 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "types.h"
+#include "bootconf.h"
+#include "obpdefs.h"
+
+extern struct bootops *bootops;
+static void display_map(char *message, struct memlist *mlistp);
+static void update_memory_map();
+
+extern int end;
+
+main()
+{
+
+	prom_printf("Welcome to the Micro-Kernel\n");
+	prom_printf("Walking the memory tree\n");
+
+	update_memory_map();
+
+	display_map("Installed physical memory:", 
+		bootops->boot_mem->physinstalled);
+
+	display_map("Available physical memory:", 
+		bootops->boot_mem->physavail);
+
+	display_map("Available virtual memory:", 
+		bootops->boot_mem->virtavail);
+
+	omak_default_breakpt();
+}
+
+static void
+display_map(char *message, struct memlist *mlistp)
+{
+	ulonglong_t total_free = 0;
+	ulonglong_t total_used = 0;
+	struct memlist *mlp;
+	ulonglong_t lastaddr;
+
+	prom_printf("%s\n", message);
+	lastaddr = 0;
+	for (mlp = mlistp; mlp; mlp = mlp->next) {
+		total_free += mlp->size;
+		if (lastaddr+1 < mlp->address) {
+			prom_printf("In use: 0x%x ---> 0x%x\t\t",
+				(int)lastaddr, (int)(mlp->address - 1));
+			total_used += (mlp->address - 1 - lastaddr);
+		} else
+			prom_printf("\t\t\t\t");
+		prom_printf("free: 0x%x ---> 0x%x\n", 
+			(int)mlp->address, 
+			(int)(mlp->address + mlp->size));
+		lastaddr = mlp->address + mlp->size;
+	}
+	prom_printf("  ---Total Free--: %dK\n", (int)(total_free >> 10));
+	prom_printf("  ---Total Used--: %dK\n", (int)(total_used >> 10));
+}
+
+static void
+update_memory_map()
+{
+	if (BOP_GETPROPLEN(bootops, "memory-update") == 0)
+		BOP_GETPROP(bootops, "memory-update", 0);
+}

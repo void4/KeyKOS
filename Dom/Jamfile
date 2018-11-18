@@ -1,0 +1,12 @@
+# VERSION $ID: $
+
+SubDir TOP src domains ;
+
+DOM_DIRLIST = kcpp support fundamental primordial testdomains ;
+
+# domain definitions will associate domains with the pseudotarget "domains"
+for DOM_DIR in $(DOM_DIRLIST) {
+    SubInclude TOP src domains $(DOM_DIR) ;
+}
+
+

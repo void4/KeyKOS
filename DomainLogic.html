@@ -1,0 +1,17 @@
+<title>Generalities for Domain Code</title>
+Code designed to run in user mode and be interpreted by domains is called “domain code”.
+There are about 60 such programs in the current release.
+All of these are written in C but but most of then use a special preprocessor called “kcpp”.
+kcpp translates commands such as
+<pre>KC (fen, Node_Fetch + FEN_Parm2) KEYSTO(k3)</pre>
+into
+<pre>{OC(Node_Fetch + FEN_Parm2);XB(0x00C00000);NB(0x0080A000);cjcc(0x00000000,&_jumpbuf); }</pre>
+This command invokes the key in one of the 16 general key slots.
+“fen” identifies the key slot and an earlier statement in the program:
+<pre>   KEY fen    = 12;   /* Receives red front end node key */</pre>
+provides the concrete value.
+The order code here is “Node_Fetch + FEN_Parm2” which is passed thru for the standard C compiler to see as an argument.
+As “fen” names the slot of the invoked key, “k3” names the slot to receive a key that will be returned when control returns to this domain.
+<p>
+main/src/domains/support/cfstart.s is a program that first runs in domains that will later run C code.
+It sets up the domain for compiled code.

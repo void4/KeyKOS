@@ -1,0 +1,7 @@
+#ident "$Id: $"
+
+text	= LOAD ?RX V0x0F100000; 
+text	: $PROGBITS ?A;
+
+data	: $PROGBITS ?AW;
+data	: $NOBITS ?AW; 

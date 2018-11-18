@@ -1,0 +1,70 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "item.h"
+#include "sysdefs.h"
+/* This goes with the code called "mem_bash.s" */
+
+static void nkey( // Snitched from itemh.h
+  short type,  /* the key type */
+  short db,    /* the data byte */
+  struct symr *np)  /* the node referenced */
+{
+   union DiskKey *p = &(nodes[curr_node_cda].keys[curr_key]);
+   nkeynosym(type, db,
+             np->isdef ? np->v.value : (long)np->v.place);
+   if (!np->isdef) {np->v.place=p->ik.cda;}
+   check_visited(np, 0);
+}
+
+prim_info_t *
+def_initial_items()
+{ 
+  prim_info_t *prim_infop;
+
+  dclsym(bash_dom_rt);
+  dclsym(bashcode);
+  dclsym(datapage);
+  dclsym(rmrt);
+  dclsym(testgkn);
+  dclsym(testgrn);
+  dclsym(testmeter);
+
+  prim_infop = (prim_info_t *)malloc(sizeof(prim_info_t));
+  pages(&datapage,1,"");
+  pages(&bashcode,1,"./stub");
+
+  def_node(&testmeter,0);
+    dk(0);
+    nkey(meterkey,0,&supermeter);
+    dk(0);
+    dk2(0xffffff,0xffffffff);
+    dk2(0xffffff,0xffffffff);
+    dk2(0xffffff,0xffffffff);
+    dk0s(10);
+
+  emptynode(&rmrt);    
+  def_node(&testgrn,0);
+    dk0s(13);
+    dk5(0, 0, 0, (0x2<<16) | 0x8000, 0x03f0<<16);
+    dk0s(2);
+  def_node(&testgkn,0);
+    pkey(&datapage,0,0);
+    nkey(nodekey,3,&rmrt);     /* to my data memory root */
+    dk0s(14);
+
+def_node(&bash_dom_rt,1);
+    dk(0);
+    nkey(meterkey,0,&testmeter);
+    msckey(errormisckey,0);
+    nkey(nodekey,3,&rmrt);	/* Data memory */
+    pkey(&bashcode,0,0x80);     /* code */
+    dk0s(8);
+    dk(0);                      /* available */
+    nkey(nodekey,0,&testgkn);
+    nkey(nodekey,0,&testgrn);
+
+  prim_infop->nodecnt = curr_node_cda;
+  prim_infop->plistcnt = curr_plist;
+  return prim_infop;
+}

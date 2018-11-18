@@ -1,0 +1,19 @@
+Kernel file list derived from jamfiles
+common:
+addrctec.c cal2tod.c ccvt.c checkc.c cpumemc.c data.c  dependc.c domainc.c gatec.c grestart.c guintc.c ioworkc.c jdatac.c jdomainc.c jmeterc.c jmiscc.c jnodec.c jcopy.c jpagec.c jresumec.c jsegmntc.c jsensec.c key2dskc.c kschedc.c kscheds.c llic.c locksc.c memoryc.c meterc.c prepkeyc.c primcomc.c queuesc.c rngtblc.c scafoldc.c spacec.c string.c timec.c unprndc.c wsc.c wss.c stubs.c memutil.c getc.c dsks.c formctld.c gbadpagc.c gccwc.c gckptc.c gcleanlc.c gcomdskc.c gdirectc.c gdskdvrc.c gintdskc.c gmigratc.c grangetc.c gswapac.c gupdpdrc.c jckptc.c jmigratc.c jnrangec.c jdevicec.c jprangec.c jresyncc.c sysgenc.c scsic.c lls.c sprintf.c
+io:
+esp.c scsi_data.c scsi_subr.c iommu.c subr_4m.s
+primordial special:
+main.c item.c ckitems.c
+promif:
+prom_devtype.c prom_env.c prom_enter.c prom_getchar.c prom_init.c prom_reboot.c prom_node.c prom_printf.c prom_putchar.c prom_prop.c prom_panic.c prom_string.c prom_map.c
+sparc:
+sparc_check.c sparc_jdomain.c sparc_ktqm.c sparc_time.c sparc_domain.c sparc_ksched.c sparc_mem.c sparc_cons.c sparc_uart.c sparc_map.c bkMap.c memcpy.c sparc_gdbstub.c crt.s sparc_asm.s stret.s sparc_ddi.s
+srmmu:
+pagetab.c
+sun4d:
+main.c locore.s
+sun4m:
+locore.s sun4m_asm.s traps.s main.c fillsysinfo.c hardclk.c hwbcopy.c
+viking:
+vik_asm.s

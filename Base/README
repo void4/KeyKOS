@@ -1,0 +1,95 @@
+These files compile with only a warning message in one file
+that is probably a bug in gcc 4.
+There are a number of undefined symbols that are mainly to SPARC
+specific code that has been removed.
+
+Changes
+I copied common/*.c into new directory D.
+I did gcc -Wmost *.c
+For each missing .h file I copied it and its directory mates into D.
+I added missing break at end of switch statement in domainc.c
+I changed "#include <scsi/scsi.h>" to "#include "scsi.h"" in devmdh.h
+I then deleted scsi.h since:
+  it had (c) by Sun, 
+  it had undocumented pragma "ident"
+  it seemed at best a stub for <scsi/scsi_types.h>
+I made a new scsi.h; see comments there.
+I added "#include "consmdh.h"" to dsks.c
+I elaborate definitions in scsi.h as gcc tells me I must.
+------
+I am renaming files ending in ".h" as ".hs" if they are copyrighted by Sun.
+Most are unneeded.
+I am renaming .c files beginning "_del-" to end in .co .
+I rename iommu.c to iommu.co for we are unlikely to encounter a machine
+  with an iommu like the old SPARCs.
+iommunex.c has become iommunex.co for the same reason. It is DMA savvy.
+I am prepending "// " to "#include" lines calling for such files.
+I have changed prom_printf to printf.
+
+I have renamed esp.c to esp.cs since I think this is Sun code despite lack of a copyright statement.
+In any case I think we are not now in a position to use SCSI code.
+
+main.c seems designed to run in a user environment to produce an ELF file
+and use the shared libelf routines.
+These routines are originally by Sun, I think.
+<http://directory.fsf.org/libs/misc/libelf.html> is a description of an
+open source version.
+Is it worthwhile to tye ourselves to a particular loader format just for loading the kernel?
+I rename main.c as main.cu on this account.
+At this time (2005 Aug 7) there are still header files copyrighted by Sun among those included in out .c files.
+There are fewer than there were.
+Many small changes have been made to accomodate the sensibilities of gcc 4.
+"gcc -Wmost *.c" produces relatively few warnings and most of those have to do with Sun hardware.
+
+There are several files ending in .cu that are merely alternative files.
+These cause symbol collisions witn "gcc *.c". "ld" then barfs.
+.c files not mentioned in jamfiles were renammed .cx files.
+
+With gcc together with ld, on the Mac, there are several symbols that seem efectively reserved.
+Among these are sprintf, memset, Memcpy, malloc and several beginning "str".
+I have capatilized these to escape from this confusion.
+
+I made a little more headway in replacing llic function with native 64 bit.
+
+undefined symbols now:
+
+_crash
+_sta03
+_Panic
+_disk_init_page
+_esp_scsi_init_pkt
+_first_reqsense_page
+_cpuargpage
+_movba2va
+_file_countpages
+_getfullname
+_verbose
+_dat2inst
+_lda03
+_lda04
+_sta04
+_splhi
+_splx
+_esp_start
+_prom_mayget
+_prom_mayput
+_splclock
+_spltty
+_clean_fp
+_idlefunction
+_CtxTabs
+_HeaderZero
+_PagHeaders
+_PagTabs
+_RgnHeaders
+_RgnTabs
+_SegHeaders
+_SegTabs
+_addr2cte
+_kRgnT
+_lda06
+_lda20
+_kernelpagept
+_v_eeprom_addr
+_drv_usecwait
+_line_addr

@@ -1,0 +1,25 @@
+# VERSION $ID: $
+
+SubDir TOP src domains primordial ;
+
+UseDomainFlags ; 
+
+Domains1 wkc.ck sbc.ck dccc.ck sbshivac.ck 
+		ckptdvrc.ck emigc.ck eresyncc.ck ;
+
+rule DomainX {
+    local _t = [ DomainCommon $(<) : $(>) ] ;
+    SetMapFile $(_t) : Mapfile1h ;
+    local _s = [ FGristSourceFiles $(>) ] ;
+    INCLUDES on $(_t) = KLUDGE ;
+    DomainFilterLink $(_t) : $(_s:S=$(SUFOBJ)) ;
+}
+
+DomainX lsfsim : lsfsims.sk lsfsimc.ck ;
+
+ObjectCcFlags dccc.ck wkc.ck ckptdvrc.ck : -DWOMB ;
+
+# Not used
+# MainAsDomain lsfsimtest : lsfsimtest.c testcjcc.c lsfsimc.c lsfsims.s ;
+# MainAsDomain testcjcc : testcjcc.c ;
+

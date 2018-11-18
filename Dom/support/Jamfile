@@ -1,0 +1,13 @@
+# VERSION $ID: $
+
+SubDir TOP src domains support ;
+
+UseDomainFlags ; 
+
+Library support : cjump.s ccvt.c llic.c sort.c bitmap.c hexcvt.c sprintf.c ;
+
+OLibrary jstart : jstarts.sk jstartc.ck ;
+# Objects bstart.sk cfstart.sk cstart.sk ;
+OLibrary bstart : bstart.sk ;
+OLibrary cfstart : cfstart.sk ;
+OLibrary cstart : cstart.sk ;

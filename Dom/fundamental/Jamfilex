@@ -1,0 +1,44 @@
+# VERSION $ID: $
+
+SubDir TOP src domains fundamental ;
+
+UseDomainFlags ; 
+ 
+# Those in DOMAINS1 use Mapfile1h, cfstart.o and support.a
+local DOMAINS1 = siac.ck fsc.ck bscrf.ck fcc.ck forkfc.ck 
+	kidc.ck mbwait2c.ck recepc.ck sik2sim.ck snodec.ck vdk2rc.ck 
+	wait.ck datacopy.ck snode2.ck pcskeepf.ck vcsf.ck bsloadf.ck
+	 vdkf.ck lclrecepf.ck lclauthf.ck tssf.ck mkeeperf.ck switcherf.ck
+         cswitcherf.ck devttyf.ck devconsf.ck ;
+
+# Those in DOMAINS2 conform to ABI and use cstart.o and support.a
+local DOMAINS2 = pcs.ck gnedit.ck clockc.ck ;
+
+# Those in DOMAINS3 use Mapfile1h, cfstart.o, dfalloc.o and support.a
+local DOMAINS3 =  tdo.ck ukeeperf.ck pschedf.ck ;
+
+Domains1 $(DOMAINS1) ;
+Domains2 $(DOMAINS2) ;
+# Domains3 $(DOMAINS3) ;
+# LinkLibraries $(DOMAINS3) : dfalloc.c ;
+# Object dfalloc.c ;
+Domain3 tdo : tdo.ck dfalloc.c ;
+Domain3 ukeeperf : ukeeperf.ck dfalloc.c ;
+Domain3 pschedf : pschedf.ck dfalloc.c ;
+
+Domain1 demo2 : demo2.ck newdemosn.s ;
+Domain1 callseg : callsegc.ck CopyIfYouCan.sk ;
+
+Main tarseg : tarseg.c ;
+
+Domain4 uwrapper : uwrapperc.ck uwrappers.sk ;
+SetMapFile uwrapper : Mapfile2hO ;
+
+DOMAINS_ALL = $(DOMAINS1) $(DOMAINS2) $(DOMAINS3) uwrapper demo2 callseg ;
+
+Tarseg Init : $(DOMAINS_ALL:S=$(SUFEXE)) ; 
+
+SEARCH_SOURCE = $(TOP)/lib $(SEARCH_SOURCE) ;
+
+Tarseg Init : init.cmd ld.so.1 ;
+

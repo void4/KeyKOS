@@ -1,0 +1,8 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel sun4d ;
+
+UseKernelFlags ;
+SubDirCcFlags -D_KERNEL ;
+
+OLibrary sun4d : main.c locore.s ;

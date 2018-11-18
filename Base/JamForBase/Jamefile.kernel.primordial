@@ -1,0 +1,35 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel primordial ;
+
+UseKernelFlags ;
+SubDirCcFlags -DUNIX_BUILD ;
+
+LINKLIBS on primbuilder = -lelf ;
+Main primbuilder : main.c item.c ckitems.c ;
+
+# DOMSEARCHPATH is a colon separated list of directories in which to
+# search for domain code. 
+local inDOM = $(TOP)/build/src/domains/ ;
+DOMSEARCHPATH = $(inDOM)primordial:$(inDOM)fundamental:$(inDOM)testdomains ;
+
+rule GenPrimordial {
+    local _t = $(<:S=$(SUFOBJ)) ;
+    local _s = [ FAppendSuffix $(>[1]) : $(SUFEXE) ] ;
+    DEPENDS $(_t) : tars domains ;
+    DEPENDS $(_t) : $(_s) $(>[2-])   ;
+    GenPrimordial1 $(_t) : $(_s) $(>[2-]) ;
+    Clean clean : $(_t) ;
+}
+rule GenPrimordial1 {
+    MakeLocate $(<) : $(LOCATE_SOURCE) ;
+    SEARCH on $(>) = $(SEARCH_SOURCE) ;
+}
+actions GenPrimordial1 {
+    $(>[1]) -P $(DOMSEARCHPATH) -o $(<)
+}
+
+GenPrimordial primordial : primbuilder ;
+
+# could be used as an empty primordial.o for rapid testing kernel startup
+# OLibrary primordial : fakeprimordial.s ;

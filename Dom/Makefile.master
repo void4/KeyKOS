@@ -1,0 +1,69 @@
+#ident "@(#)Makefile.master	1.4 27 Apr 1995 12:10:08 %n%"
+
+# This is the domains' master include file. It is included by
+# every Makefile in the subdirectories below. In order to work correctly
+# the subdirectory Makefile must first set BASEDIR to the relative path
+# which will locate the root of the project tree. After that, this
+# file should be included relative to that path.
+#		BASEDIR = ../..
+#		include $(BASEDIR)/domains/Makefile.master
+#
+# The above value of BASEDIR would work for a Makefile which is two
+# levels below the project root.
+#
+# Other conventions to note:
+# If you wish to augment any of the FLAGS macros in a subdirectory
+# makefile, use the += notation. An example:
+#	DOM_CFLAGS += -Dmyflag
+
+# macros for specifying the include file directores
+INCDIR = $(BASEDIR)
+INCSUBDIRS = domains/include include/sparc include/common
+INCS = $(INCSUBDIRS:%=-I$(INCDIR)/%)
+
+# macros for specifying commands
+CC = gcc
+NATIVE_CC = gcc
+AS = as
+MAKE = make
+#LD = ld
+LD = /usr/ccs/bin/ld
+KCPP = $(BASEDIR)/domains/kcpp/kcpp
+
+# macros for specifying command line arguments to commands
+CPPFLAGS = 
+FIXEDCFLAGS = -mv8
+DOM_CFLAGS = -O -g
+AS_CPPFLAGS = -P -D_ASM
+ASFLAGS =
+
+# macros for specifying compilation
+# CMDPREFIX is used for suppressing command line checking
+# A common use would be to cd to a low level directory and make a
+# particular .o using different flags (perhaps DOM_CFLAGS=-g). When that
+# sub-build is done, a high level make would be done using CMDPREFIX=?
+# which tells make to not worry about differences in the compiler 
+# command line arguments. Otherwise the .o you just hand built would
+# be built again with the default command line arguments.
+
+CMDPREFIX=
+COMPILE.c = $(CC) $(CPPFLAGS) $(FIXEDCFLAGS) $(DOM_CFLAGS) $(INCS) -c
+COMPILE.s = $(AS) $(AS_CPPFLAGS) $(ASFLAGS) $(INCS)
+
+%.o: %.c
+	$(CMDPREFIX) $(COMPILE.c) $<
+%.o: %.s
+	$(CMDPREFIX) $(COMPILE.s) $<
+
+# miscellaneous macros
+MSFILES = .make.*
+
+# EXPORTVARS containings macro names which may be changed on the command
+# line. EXPORTS is used in makefiles which call sub-makefiles in order
+# to propagate the command line definition
+# EXPORTVARS = ARCH PLAT MMU
+# EXPORTS = $(EXPORTVARS:%=%=\$$\(%\)\;)
+
+# miscellaneous targets
+.NO_PARALLEL:
+.KEEP_STATE:

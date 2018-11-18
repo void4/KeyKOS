@@ -1,0 +1,5 @@
+#ident "@(#)Mapfile1h	1.3 08 Mar 1995 13:29:48 %n%"
+
+textd	= LOAD ?RWX V0x00000000; 
+textd	: $PROGBITS ?A;
+textd	: $NOBITS ?A;

@@ -1,0 +1,50 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include <string.h>
+#include "memutil.h"
+
+typedef unsigned int u32;
+void * Memcpy(void * to, const void * from, size_t n){
+u32 f = (u32)from, t = (u32)to;
+while((t & 3) && n) {*(char*)t++ = *(char*)f++; --n;}
+// Now either n == 0 or t is on 4 byte boundary.
+if(!n) return to;
+// t is on word boundary!
+if(f&3){char lb = f&3;
+   char sa = lb << 3;
+   f &= ~3; // Round to word boundary.
+   {u32 d = *(u32*)f << sa;
+   while(n & ~3){u32 e = *++(u32*)f;
+     *((u32*)t)++ = d | e >> (32 - sa);
+      n-=4; d = e<< sa;}
+   f |= lb;}}
+else while(n & ~3) {*((u32*)t)++ = *((u32*)f)++; n-=4;}
+while(n--) *(char*)t++ = *(char*)f++;
+return to;}
+
+/*
+#include <stdlib.h>
+#include <stdio.h>
+#define N 27
+int main(){
+unsigned char in[N], out[N], tout[N]; int nc=0;
+int i, j, k, n;
+for(i=0; i<N; ++i) in[i] = i;
+for(i=0; i<=N; ++i)
+  for(k=0; k<=N; ++k) {short bm = N-(i<k?k:i);
+    for(n=0; n<=bm; ++n){
+      for(j=0; j<N; ++j) {out[j] = tout[j] = rand(); in[j] = rand();}
+      mEmcpy(&out[k], &in[i], n);
+      Memcpy(&tout[k], &in[i], n); ++nc;
+      if(Memcmp(out, tout, N))
+          {printf("Bang %d, %d, %d\n", i, k, n);
+            for(j=0; j<N; ++j) printf("%02X ", j); printf("\n");
+            for(j=0; j<N; ++j) printf("%02X ", in[j]); printf("\n");
+            for(j=0; j<N; ++j) printf("%02X ", out[j]); printf("\n");
+            for(j=0; j<N; ++j) printf("%02X ", tout[j]); printf("\n");
+            for(j=0; j<N; ++j) printf("%02X ", 255 & (u32)&in[j]); printf("\n");
+            for(j=0; j<N; ++j) printf("%02X ", 255 & (u32)&out[j]); printf("\n");
+        } }}
+   printf("%d tests\n", nc);}
+*/

@@ -1,0 +1,7 @@
+kc user/sys/bsloadf 0 (,sb,m,sb) (,bsload)
+kc user/sys/vcsf 0 (,sb,m,sb) (,prg)
+kc bsload 0 (,test/MsgBuf,prg) (sa)
+kc prg 17 (,sb)  (,prgfac)
+kc user/sys/factoryc 0 (,sb,m) (,fb)
+kc fb 17+32 (sa,prgfac)
+kc fb 66 () (,MsgBuff)

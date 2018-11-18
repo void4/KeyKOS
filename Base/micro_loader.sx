@@ -1,0 +1,647 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+	! This is code to prepare for the kernel.
+	! It reconnoiters the space used by the ROM
+	! and builds a map for the kernel's code,
+	! initialized data, unitialized data,
+	! boot allocated data.
+	! It reports to the kernel what RAM pages are available
+	! for the disk cache.
+	! We demonstrate that upon loading,
+	! addresses 4k thru 10M are: read-write and uncacheable,
+	! and mapped V=R.
+	! The challange is to discover the real wherabouts of the RAM.
+! The section "KernelMap" in Sparc-kl.tkr provides a pretty good
+! overview of this code.
+
+! RelocTable
+/*
+	struct RelocTable {
+		ulong m_magic
+		ulong m_entryCount
+		ulong m_firstUnloadedPage
+		ulong m_kernelEntryAddress
+		RelocTableEntry m_tableEntries[m_entryCount]
+	}
+*/
+
+m_magic=0			! should be 'Norm' in big-endian format
+m_entryCount=4			! the number of entries in the relocation table
+m_firstUnloadedPage=8		! the first free page after our kernel file
+m_kernelEntryAddress=12	! the entry address of the kernel AFTER it's been mapped
+m_tableEntries=16		! RelocTableEntry m_tableEntries[m_entryCount]
+
+
+! RelocTableEntry
+/*
+	struct RelocTableEntry {
+		ulong m_srcAddr
+		ulong m_dstAddr
+		ulong m_fileSize
+		ulong m_memSize
+		ulong m_elfFlags
+	}
+*/
+	
+m_srcAddr=0			! location of the loader segment within current map
+m_dstAddr=4			! desired location of segment after mapping
+m_fileSize=8			! size in bytes of loader segment in boot file
+m_memSize=12			! size in bytes needed in memory - may include .bss
+m_elfFlags=16			! raw loader segment flag bits from ELF file
+sizeof_RelocTableEntry=20	! helpful for stepping thru array
+
+
+! ELF loader segment flags
+PF_R=0x4			! readable
+PF_W=0x2			! writable
+PF_X=0x1			! executable
+	
+	
+	
+	.text
+	
+	
+	! Perhaps we should do a save here but then again we have no
+	! plans to return!
+	
+	.global code		! The first code be run after tftp.
+code:
+	! WE HAVE JUST RECEIVED CONTROL OVER THE MACHINE FROM OPEN FIRMWARE
+	! WE MUST PRESERVE THE REGISTERS IT HAS PASSED TO US, NAMELY
+	! %o0 WHICH CONTAINS A POINTER TO THE romvec.
+	! %o2 used to have meaning, and we're preserving it for backward
+	! compatibility on machines unforseen.
+	
+! Following constants are offsets on our little static area
+! Allocated on the heap.
+Save_o0=0
+Save_o2=4
+DMZ=8 ! Disk cache ends here
+HighGround=12
+dcRf=16 ! Disk cache starts here
+DivvySpace=20 ! virtual address of private kernel boot allocated space.
+DivvySize=24 ! size of private kernel boot allocated space.
+eEarlyMissive=28 ! Space required on stack.
+Missive=0xf8003f00 ! real address = 0x4f00
+aWindowPageTable=32
+! The above is the virtual address at which the kernel can learn of the
+! allocations made by this program. Offsets within Missive are as follows:
+! The same offsets as in the block on the stack accessed by %g7.
+! Indeed after we have arranged for our access to the Missive we point %g7 to it.
+
+! Except for some routines starting at "mi:", this code pretty much
+! flows from top to bottom.
+! Those routines save the registers that they use.
+! This makes allocating registers feasible
+! by seraching forwards and backwards for register references.
+
+	sub %o6, 32, %o6		! Make room for saving %o0 & %o2
+	mov %o6, %g7 ! To access our little static storage for this file.
+	st %o0, [%g7 + Save_o0]
+	st %o2, [%g7 + Save_o2]
+	! We shall trust the %o6 value for a crude stack.
+	! We will not use save and restore instructions, however.
+
+tabsat=0x4000
+bottab=0x100
+Mapped=0xa00000
+	! tabsat above is the place down from which we allocate kernel map
+	! tables. bottab is a place at which to panic if we havn't finished
+	! allocating kernel tabs.
+	
+	! Perhaps we will make these context 1 as we give control
+	! to the kernel.
+
+	! The next block of code merely verifies V=R for the first 10 meg.
+	! This has been an implicit assumption in early planning.
+	set 0x1000, %i3
+	set 0x1000, %i2
+	set (Mapped>>12)-2, %i4	! Number of pages we expect
+lp:	call mi; or %i2, %g0, %i1
+	subcc %i1, %i2, %g0
+	tnz 0x76
+	subcc %i4, 1, %i4
+	bnz lp
+	add %i2, %i3, %i2	! On to next page
+
+! Now we do a census of which physical memory is mapped just now.
+! We verify that only virtual 0 to 10MB map to real 0 to 10MB
+! and also that virtual addresses beyond 10MB are either invalid or map
+! to top of physical memory, whose lowest and highest addresses we shall
+! determine.
+! This is a tree walk of OB's map in the classic form of a three deep loop.
+    sub %g0, 1, %l1 ! Initialize "lowest high-map".
+    set 0, %i5 ! Initialize highest high-map.
+    set 0x100, %l0
+    lda [%l0]4, %l0
+    sll %l0, 4, %l0 ! Locates context table 
+    lda [%l0]0x20, %l0
+    andn %l0, 3, %l0
+    sll %l0, 4, %l0 ! Locates current region table.
+    set 0x100, %i2 ! Region count
+PollRegion:
+    lda [%l0]0x20, %l2 ! Fetch region table entry.
+    and %l2, 3, %l3 ! Examine validity field.
+    subcc %l3, 1, %g0
+    tg 0x40 ! Exotic entry
+    bl NextRegion
+    andn %l2, 3, %l2
+    sll %l2, 4, %l2 ! Locate Segment Table
+    set 64, %l3 ! Count of segment table entries
+PollSegment:
+    lda [%l2]0x20, %l4 ! segment table entry
+    and %l4, 3, %l5
+    subcc %l5, 1, %l5
+    tg 0x41 ! Exotic entry
+    bl NextSegment
+    andn %l4, 3, %l4
+    sll %l4, 4, %l4 ! Locate Page Table
+    set 63, %l5 ! Count of page table entries
+PollPage:
+    lda [%l4]0x20, %l6 ! Page table entry
+    andcc %l6, 1, %g0
+    tg 0x42 ! bug or exotic
+    andcc %l6, 2, %g0
+    bz NextPage
+    set 0x100, %l7
+    sub %l7, %i2, %l7
+    sll %l7, 24, %l7
+    set 0x40, %i3
+    sub %i3, %l3, %i4
+    sll %i4, 18, %i4
+    or %l7, %i4, %l7
+    sub %i3, %l5, %i3
+    sll %i3, 12, %i3
+    or %l7, %i3, %l7 ! The virtual address that accesses this PTE
+    set Mapped, %i4
+    cmp %l7, %i4
+    blu LowAddress
+    cmp %l6, %l1
+    bgu NextTest
+    nop
+    mov %l6, %l1
+NextTest:
+    cmp %l6, %i5
+    bl NextPage
+    nop
+    ba NextPage
+    mov %l6, %i5
+LowAddress:
+    set Mapped/16, %i3
+    subcc %l6, %i3, %g0
+    tg 0x43 ! I thought that we had alread checked this!
+NextPage:
+    subcc %l5, 1, %l5
+    bnz PollPage
+    add %l4, 4, %l4
+NextSegment:
+    subcc %l3, 1, %l3
+    bnz PollSegment
+    add %l2, 4, %l2
+NextRegion:
+    subcc %i2, 1, %i2
+    bnz PollRegion
+    add %l0, 4, %l0
+    st %i5, [%g7+HighGround] ! Largest real address in OB's map.
+    andn %l1, 0xff, %l1
+    sll %l1, 4, %l1
+    set 0x4000, %i2 ! Leave 4 pages of DMZ.
+    sub %l1, %i2, %l1
+    st %l1, [%g7+DMZ] ! Stash our end (first page we don't use).
+
+	set tabsat-0x400, %g5	! Kernel Region table located here.	
+	! %g5 will remain constant until we hand it over to the real kernel.
+	or %g5, 0, %g6		! Below which we shall allocate map space
+	
+	! Clear kernel's region table
+	set 0x3fc, %i0		! size-4 of region table to zero.
+zr:	sta %g0, [%g5+%i0]0x20	! zap an entry
+	subcc %i0, 4, %i0	! backwards thru table
+	bge zr
+	nop
+
+	! ba practice
+
+	! Block below interprets the RelocTable structure imagined above.
+	set RelocTable, %i3	! Beware loaders theory of where we are!
+	set code - 0x4000, %i4
+	sub %i3, %i4, %i3	! adjust for loader's delusion.
+	ld [%i3+m_magic], %i4
+	set 0x4e6f726d, %i5	! Test for "Norm"
+	xorcc %i4, %i5, %g0
+	tnz 0x51		! Not my stuff!
+	ld [%i3+m_entryCount], %g1 ! count of remaining relocation blocks
+	ld [%i3+m_firstUnloadedPage], %o5	! Locate pages available for allocation
+	srl %o5, 4, %o5
+	or %o5, 4*7+2+0x80, %o5	! A rw cached page table entry
+	add %i3, m_tableEntries, %i3 ! Henceforth %i3 locates a relocation req.
+
+YetAnotherRelocation:
+	ld [%i3+m_fileSize], %o0
+	ld [%i3+m_srcAddr], %i1
+	ld [%i3+m_dstAddr], %i2
+	or %i1, %i2, %i4
+	andcc %i4, 0xfff, %g0
+	tnz 0x54		! Page boundaries promised!
+
+	! It would be well to verify that the physical addresses do not overlap
+	! and also that the virtual addresses don't. We can defer this to C code.
+	! It would even be good to ensure that neither a physical nor virtual
+	! page belongs to two ranges as this can lead to less protection
+	! than we expect.
+
+	srl %i1, 12, %i1
+	sll %i1, 8, %i1
+	or %i1, 0x80+6*4+2, %i1	! Form initial page table entry.
+	ld [%i3+m_elfFlags], %i4
+	and %i4, PF_W, %i4	! ### THIS CODE IS SENSITIVE TO FLAG VALUES
+	sll %i4, 1, %i4
+	or %i1, %i4, %i1	! Make writable according to elfFlags.
+	call Mapv; nop	! updates %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+	
+	! Next we map uninitialized addresses here
+	! from a pool beyond the end of loaded memory.
+	ld [%i3+m_memSize], %o1
+    ld [%i3+m_fileSize], %o0
+    subcc %o1, %o0, %o0 ! amount to map
+	mov %o5, %i1
+	ble AllMapped
+	nop
+    andn %i1, 0xff, %l0
+    sll %l0, 4, %l0
+    srl %o0, 2, %l1 ! word count to clear
+clr: sta %g0, [%l0]0x20 ! clear a word
+    subcc %l1, 1, %l1
+    bnz clr
+    add %l0, 4, %l0
+    call Mapv; nop ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+    mov %i1, %o5
+AllMapped:
+	subcc %g1, 1, %g1
+	bnz YetAnotherRelocation
+	add %i3, sizeof_RelocTableEntry, %i3 ! On to next relocation block
+	
+	set 0x4000, %i2; set 0x1000, %o0
+	
+	! Map me into kernel's space
+    ! so that I can switch to the kernel and also, perhaps, so that
+    ! kernel can call me to nullify the addresses that
+    ! are not needed after bb.
+	call Mapv; set 0x460 + 4*6+2, %i1
+	! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+	
+	! We now modify the current context table so that the new
+	! map is context 1. The kernel will establish its own
+	! context table later.
+	
+	set 0x100, %o3
+	call adj
+	lda [%o3]4, %g1		! Locate context table (again).
+	add %g1, 4, %g2		! 4 is offset into old context table
+	srl %g5, 4, %o3		! the form of region table pointers
+	or %o3, 1, %o3		! table code
+	sta %o3, [%g2]0x20	! Store into context table.
+	
+! The following code block causes the last two virtual regions
+! to be mapped as in Open Boot. Hopfully this will apease OB.
+    call adj
+    lda [%g1]0x20, %g1  ! Locate OB's region table.
+	add %g1, 0x3f8, %g4
+	lda [%g4]0x20, %g2 ! OB's feXXXXXX region descriptor.
+	add %g5, 0x3f8, %g3
+	sta %g2, [%g3]0x20 ! Share OB's segment table.
+	add %g1, 0x3fc, %g4
+	lda [%g4]0x20, %g2 ! OB's ffXXXXXX region descriptor.
+	add %g5, 0x3fc, %g3
+	sta %g2, [%g3]0x20 ! Share OB's segment table.
+
+	! Now it is safe to switch to the new context.
+	set 0x200, %o3
+	set 1, %o4		! context number  
+	sta %o4, [%o3]4
+	set 0x400, %o4 ! code to do entire TBL purge
+	sta %g0, [%o4]3 ! Poke the MMU
+
+   set Missive, %i2
+   set 0x400 + 4*7 + 2, %i1 ! This has the real address of this code hidden in it.
+   set 0x1000, %o0 ! one page please
+   call Mapv; nop ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+! Now we can copy the block at %g7 to the Missive.
+   set Missive, %i2   
+   set eEarlyMissive, %l1
+mvl: ld [%g7], %o0
+   st %o0, [%i2]
+   subcc %l1, 4, %l1
+   add %g7, 4, %g7
+   bnz mvl
+   add %i2, 4, %i2
+   set Missive, %g7
+
+! Now we map some miscelaneous magic pages and some
+! addresses the kernel will use as windows.
+vWindows=0xf8004000 ! Virtual address of the windows
+   set vWindows, %i2
+   set 4*7 + 2, %i1
+   call Mapv; set 0x1000, %o0 ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+   ! This call is for the side effect of putting the physical
+   ! address of a page table entry in %l0. The normal effect of
+   ! producing a new page table entry is harmless.
+   and %l0, 0xfff, %l2 ! Isolate byte within page offset.
+   andn %l0, 0xfff, %i1
+   srl %i1, 4, %i1
+   add %i1, 4*7+2, %i1 ! A pte to map the kernel's variable pte's.
+   set 0x1000, %o0 ! just one page to map
+   call Mapv; set 0xf8002000, %i2
+   ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+   set 0xf8002000, %l1
+   or %l1, %l2, %l0 ! Combine the VPN with the byte within page offset.
+   st %l0, [%g7+aWindowPageTable]
+
+KDebug: mov %o5, %i1; add %o5,0x100, %o5 ! Grab a frame
+   set 0x3f000, %i2
+   set 0x1000, %i0
+   call Mapv; nop ! addressable by patches
+   ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+
+! Now we allocate the remaining RAM pages to two purposes
+! 1. Private kernel space not known to the loader as bss.
+! 2. Space to be used as a disk cache.
+! The first category will subdivided by Main.c into a few
+! areas whose size is contingent of the size of physical RAM.
+! The RAM that we allocate here starts at %o5 and
+! ends at DMZ.
+frac=0 ! Until dynamic boot allocation (then about 15)
+! We arbitrarily allocate frac% of remaining RAM to private kernel
+! space and the remaining to the disk cache.
+! Note that restart kernels will not have promordial material
+! occuying RAM at this point and thus much more RAM
+! will be availabe for this boot allocation.
+    andn %o5, 0xff, %o2
+    sll %o2, 4, %o2
+    ld [%g7+DMZ], %o3
+    sub %o3, %o2, %i1 ! Space to allocate
+    sethi %hi(0x7fffffff/100*frac), %o4 ! scaled 15%
+! The "frac" above is a tuning parameter!!!
+    umul %i1, %o4, %o4 ! 
+    mov %y, %o4
+    sll %o4, 1, %o4
+PreDivvy: ! just a test point
+    andn %o4, 0xfff, %o4
+    st %o4, [%g7 + DivvySize]
+    add %o4, %o2, %i1 ! start of disk cache RAM frames
+    st %i1, [%g7+dcRf]
+! Now we map the kernel's private boot time space
+    sethi %hi(0x1000000), %i2 ! a convenient number to remember.
+    sethi %hi(0x3f000), %o3
+    and %o2, %o3, %o3
+    or %i2, %o3, %i2 ! Line up boot alloc area for big-page alignment.
+    st %i2, [%g7 + DivvySpace]
+    mov %o5, %i1 ! more of the same page table entries
+    mov %o4, %o0 ! How much to map
+    call Mapv; nop ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+    mov %i1, %o5
+
+	set RelocTable, %i3	! Beware loader's theory of where we are!
+	set code - 0x4000, %i4
+	sub %i3, %i4, %i3	! adjust for loader's delusion.
+	ld [%i3+m_kernelEntryAddress], %l3
+	ld [%o6 + Save_o0], %o0
+	ld [%o6 + Save_o2], %o2
+    ld [%g7+dcRf], %i0
+    ld [%g7+DMZ], %i1
+    ld [%g7+DivvySpace], %i2
+    ld [%g7+DivvySize], %i3
+	add %o6, 32, %o6
+	jmpl %l3, %g0
+	ta 00 ! Look before you Leap.
+
+practice:
+	! The next block of code is a test case for building kernel maps.
+	! It runs alternatively to the previous block.
+	
+	set 0x5000, %i2		! First address to test map.
+	set 0x880+3*4+2, %i1	! First page table entry.
+	set 0x1000, %i4		! increment for virtual addresses
+	set 200, %i3		! how many pages to map
+	set 0x1000, %o0
+	
+ml:	call Mapv; nop ! changes %i1, %i2, %o0, %g3, %g6, sets %l0, reads %g5
+	
+	subcc %i3, 1, %i3
+	add %i2, %i4, %i2
+	bnz ml
+	add %i1, 0x100, %i1
+	ta 0x4e			! for now
+
+mi:	! Save some registers
+	
+	! This routine returns the real adress (in %i1) to which
+	! the input virtual address (in %i1) is mapped.
+	! This code illustrates access to mapping tables
+	! and also help confirms our supicions about initial state.
+	
+	sub %o6, 32, %o6
+	st %o2, [%o6] 
+	st %o0, [%o6+4]
+	st %g0, [%o6+8]
+	st %o3, [%o6+12]
+	st %o7, [%o6+16]
+	st %g1, [%o6+20]
+	st %o1, [%o6+24]
+	st %g2, [%o6+28]
+	
+	or %g0,0x200,%o2
+	lda [%o2]4,%o0		! Fetch context number
+	or %g0,0x100,%o3
+	call adj; lda [%o3]4,%g1		! Locate Context table
+       sll %o0, 2, %o0
+	lda [%g1+%o0]0x20, %o0	! entry 0 of context table
+				! which is a "page table descriptor".
+	and %o0, 3, %o1
+	subcc %o1, 1, %g0
+	tnz 0x74
+	call adj; andn %o0, 3, %g1
+	
+	 ! Now %g1 holds the address of the level 1 page table.
+	srl %i1, 32-8, %o1
+	sll %o1, 2, %o1
+	lda [%g1+%o1]0x20, %o0	! fetch entry of top page table.
+	and %o0, 3, %o1
+	subcc %o1, 1, %g0
+	tnz 0x73
+	call adj
+	andn %o0, 3, %g1
+	
+	 ! Now %g1 holds address of (first) level 2 page table.
+	srl %i1, 32-8-6, %o1
+	and %o1, 63, %o1
+	sll %o1, 2, %o1
+	lda [%g1+%o1]0x20, %o0	! fetch entry of next page table.
+	and %o0, 3, %o1
+	subcc %o1, 1, %g0
+	tnz 0x72
+	call adj
+	andn %o0, 3, %g1
+
+	 ! Now %g1 holds address of (first) level 3 page table.
+	srl %i1, 32-8-6-6, %o1
+	and %o1, 63, %o1
+	sll %o1, 2, %o1
+	lda [%g1+%o1]0x20, %o0	! fetch entry of bottom page table.
+	and %o0, 3, %o1
+	subcc %o1, 2, %g0	! Should be a page descriptor!
+	tnz 0x71
+	call adj
+	andn %o0, 255, %g1
+	or %g1, %g0, %i1
+
+	 ! Now %i1 holds real address of virtual page.
+	ld [%o6], %o2
+	ld [%o6+4], %o0
+	ld [%o6+8], %g0
+	ld [%o6+12], %o3
+	ld [%o6+16], %o7
+	ld [%o6+20], %g1
+	ld [%o6+24], %o1
+	ld [%o6+28], %g2
+	retl
+	add %o6, 32, %o6
+
+adj: st %o5, [%o6-4]
+	sethi %hi(0xf0000000), %o5
+	andcc %g1, %o5, %g0
+	tnz 0x70		! Verify that we are in range.
+	set 63, %o5
+	sll %g1, 4, %g1		! Sneaky addressing
+	andn %g1, %o5, %g1	! delete two bits of noise
+	retl			! Return after next instruction
+	ld [%o6-4], %o5
+
+Mapv: 
+	sub %o6, 24, %o6	! stack frame to save regs
+	st %i3, [%o6]
+	st %i4, [%o6+4]
+	st %i5, [%o6+8]
+	st %g1, [%o6+12]
+	st %g2, [%o6+16]
+	st %o7, [%o6+20]
+
+	! This routine causes the stuff belonging at virtual address (%i2)
+	! to be mapped in the kernel with page table entry from (%i1).
+	! Region table assumed at %g5
+	! It allocates new tables as required. (using %g6)
+	! It is not sensitive to order of building.
+	! It will continune physical and virtual mapping for %o0 space.
+	! %i1 & %i2 are incremented by amount of mapped space. %o0 is decremented.
+	! %l0 returns the physical address of the last page table entry.
+
+!        andn %i1, 0x80, %i1   ! remove CACHE bit from pte
+
+	and %i1, 4*6, %i3
+	cmp %i3, 4*6
+	tne 0x61 ! We must build no user accessible pages now.
+Mapve:
+    subcc %g0, %o0, %g0 ! Is there (still) space to map?
+    bpos MapDone ! nope
+	srl %i2, 32-8, %i3	! isolate region index
+	sll %i3, 2, %i3		! Offset into region table
+	call adj
+	lda [%g5+%i3]0x20, %g1	! Fetch region descriptor
+	orcc %g1, 0, %g2	! Have we a segment table?
+	bnz RegionAvailable
+	nop
+
+	! Allocate segment table
+	sub %g6, 256, %g6	! where segment table will go
+	subcc %g6, bottab, %g0
+	tl 0x63
+	set 256-4, %i5		! size-4 of segment table
+	
+zs:	sta %g0, [%g6+%i5]0x20	! Zap an entry.
+	subcc %i5, 4, %i5	! backwards thru segment table.
+	bge zs
+	nop
+	srl %g6, 4, %i5		! Prepare segment table locator for region table.
+	or %i5, 1, %i5		! include "page table code"
+	sta %i5, [%g5+%i3]0x20	! Place the table locater.
+	or %g6, 0, %g2		! address of segment table.
+	
+RegionAvailable:		! at %g2
+	srl %i2, 32-8-6, %i4 
+	and %i4, 63, %i4	! isolate segment index
+	sll %i4, 2, %i4		! Offset into segment table
+	call adj
+	lda [%g2+%i4]0x20, %g1	! segment table entry -- page table locator
+	orcc %g1, 0, %g3	! Have we a page table?
+	bnz SegmentAvailable
+	nop
+
+    ! Super Page Policy
+    ! Perhaps we don't need a page table.
+    ! If both virtual and real addresses are multiples of 2^18 then
+    ! we can do the big page thing.
+    ! The caller must probably conive for this to happen.
+    ! Further an arbitrary rule is that we do this only
+    ! in the range of virtual addresses: f0xxxxxx.
+    ! This allows ad-hoc small pages without
+    ! risk of colliding super pages.
+    ! For now the two trap tables get private rooms (pages).
+    srl %i2, 24, %i5
+    subcc %i5, 0xf0, %g0
+    bne apt; nop
+    set 0x3f00, %i5
+    andcc %i1, %i5, %g0
+    bnz apt
+    nop
+    set 0x3ffff, %i5
+    andcc %i2, %i5, %g0
+    bnz apt
+    sta %i1, [%g2+%i4]0x20
+    set 0x4000, %i3
+    add %i1, %i3, %i1
+    sethi %hi(0x40000), %i3
+    sub %o0, %i3, %o0 ! recently ignored yield of this instruction.
+    b Mapve; add %i2, %i3, %i2    
+
+apt: ! Allocate page table.
+    sub %g6, 256, %g6	! Allocate space for page table.
+	cmp %g6, bottab
+	tl 0x77
+	srl %g6, 4, %i5		! prepare page table locator
+	or %i5, 1, %i5		! add table code
+	sta %i5, [%g2+%i4]0x20	! Store into segment table.
+	set 256-4, %i5		! size to clear
+zp:	sta %g0, [%g6+%i5]0x20	! Zap page table entry.
+	subcc %i5, 4, %i5	! backwards thru new page table
+	bge zp
+	nop
+	or %g6, 0, %g3
+
+SegmentAvailable:		! at %g3
+	srl %i2, 32-8-6-6, %i4 
+	and %i4, 63, %i4	! Isolate page index.
+	sll %i4, 2, %i4		! offset into page table
+	sta %i1, [%g3+%i4]0x20
+	add %g3, %i4, %l0 ! for the obscure case where we need the adddress
+	! of the page table entry
+
+    sethi %hi(0x1000), %i4
+    sub %o0, %i4, %o0
+    add %i2, %i4, %i2
+    b Mapve; add %i1, 0x100, %i1
+    
+MapDone: set 0x400, %i3 ! code to do entire TBL purge
+	sta %g0, [%i3]3 ! Poke the MMU
+	
+	ld [%o6], %i3
+	ld [%o6+4], %i4
+	ld [%o6+8], %i5
+	ld [%o6+12], %g1
+	ld [%o6+20], %o7
+	ld [%o6+16], %g2
+	retl; add %o6, 24, %o6
+    
+	.align 8
+RelocTable:
+

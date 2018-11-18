@@ -1,0 +1,29 @@
+#ident "@(#)ccvt.c	1.2 13 Feb 1995 15:42:45 %n%"
+
+#include "kktypes.h"
+#include "sysdefs.h"
+#include "cvt.h"
+#include <string.h>
+#include "memutil.h"
+
+void *long2b(long i, uchar *str, int len) 
+{  
+	if (len > 4) {
+		Memset(str, 0, len-4);
+		str += len-4;
+		len = 4;
+	}
+	Memcpy(str, (char *)&i+4-len, len);
+	return str;
+}
+
+long b2long(const uchar *str, int len)
+{  
+	long v = 0L;
+	if (len > 4) {
+		str += len-4;
+		len = 4;
+	}
+	Memcpy((char *)&v+4-len, str, len);
+	return v;
+}

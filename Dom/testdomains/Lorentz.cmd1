@@ -1,0 +1,35 @@
+kc user/sys/bsloadf 0 (,sb,m,sb) (,bsload)
+kc user/sys/vcsf 0 (,sb,m,sb) (,prgj)
+kc bsload 0 (,test/join,prgj) (sa)
+kc prgj 17 (,sb)  (,prgfacj)
+kc user/sys/factoryc 0 (,sb,m) (,fbj)
+kc fbj 17+32 (sa,prgfacj)
+kc fbj 66 () (,joinf)
+
+kc user/sys/vcsf 0 (,sb,m,sb) (,prgf)
+kc bsload 0 (,test/Lorentz,prgf) (sa)
+kc prgf 17 (,sb)  (,prgfacf)
+kc user/sys/factoryc 0 (,sb,m) (,fbf)
+kc fbf 17+32 (sa,prgfacf)
+kc fbf 66 () (,ff)
+
+kc sb 0 () (,smsk) ; Make scheduled meter.
+kc smsk 16+1 (,m) ; Endow with my meter.
+kc user/sys/dkc 0 (%x000002000000) (,nk) ; two sec
+kc smsk 16+3 (,nk) ; Counter into meter
+kc smsk 34 () (,sm) ; The scheduled meter
+kc joinf 40 (,sb,m,sb) (,jms,,,jmr)
+kc smsk 16+2 (,jmr) ; Install meter keeper.
+
+kc joinf 40 (,sb,m,sb) (,j1s,,,j1r)
+kc joinf 40 (,sb,m,sb) (,j2s,,,j2r)
+kc joinf 40 (,sb,m,sb) (,j3s,,,j3r)
+kfork ff 1 (,sb,sm,sb,j1r)
+kfork ff 2 (,sb,sm,sb,j2r)
+kfork ff 3 (,sb,sm,sb,j3r)
+
+kc jms 1 () (%x,km0,km1,km2,mk3)
+
+kc j1s 1 () (%x)
+kc j2s 1 () (%x)
+kc j3s 1 () (%x)

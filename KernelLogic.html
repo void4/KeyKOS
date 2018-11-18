@@ -1,0 +1,67 @@
+<title>Kernel Logic, Past and Prospect</title>
+The kernel design has changed little since <a href=http://cap-lore.com/CapTheory/KK/m/kernel-logic.html>that of the 370 kernel</a>.
+But not a line of code remains from that kernel which was written in 370 assembler.
+All assembly code for the new system is specific to some modern CPU.
+I tentatively adopt “base” in place of “the kernel” as it seems to improve the flow of text.
+<p>The new base runs privileged and unswapped.
+Whether base runs mapped depends on the specific processor and whether the <a href=http://cap-lore.com/CapTheory/PrivMap.html>RAP</a> can be avoided.
+There are no provisions for base code to be introduced while the system runs.
+I resist such provisions for now.
+<p>The 370 ran with interrupts disabled but that was partly a figment of the 370 architecture.
+370 IO channels ran concurrently with the CPU and on some models <a href=http://cap-lore.com/Hardware/IO.html#breakin>that IO logic was indeed performed by the same micro engine that executed the 370 instructions</a> in which base was expressed.
+Modern systems may require that the CPU perform corresponding intermediate steps of the channel programs in which case interrupts for performing such IO actions will be enabled.
+The separation of base state from state of the “virtual channel process” remains a design principle.
+The base state remains logically isolated from the states of “channel programs”.
+<h3>Starting Base</h3>
+The SPARC version of base was placed in RAM thru tftp, which was a temporary debugging hack.
+I describe the steps here but do not recommend them.
+The SPARC ROM code was reminiscent of Open Boot and would place base at low core addresses of its choosing.
+As our code gained control a reconnaissance routine would first process the clues left by the ROM code, especially to find the real (bus) addresses available to base and its guests.
+A more advanced version of this might conditionally load alternative drivers depending on other optional system components.
+<p>The 370 kernel booted from the disk into real addresses.
+First a block of code came into low RAM and this code copied the kernel into real addresses that had been assigned as the kernel was built in the development environment.
+370 hardware guaranteed contiguous real memory starting at 0.
+The 370 channel architecture made base oblivious to all device details except for a few details about the disks from which it was to reanimate a checkpoint, swap and produce new checkpoints.
+The logic necessary for particular types of IO devices was outside base.
+There was also some confusion about channel addresses led to which classes of device.
+Other operating systems for the 370 had similar confusion.
+More information is available <a href=http://cap-lore.com/CapTheory/KK/Bang.html>here</a>.
+<h3>More Detail</h3>
+This is some information that might be useful for porting to a 32 bit SPARC.
+An ELF file was produced by program kernel/make_bootable_image.cx which relied on libelf from Sun.
+This file included the code for base and the micro_loader.
+File kernel/micro_loader.sx is a SPARC assembler program to perform the reconnaissance referred to above.
+It runs immediately after the boot ROM has transferred it and base to the RAM of the SPARC.
+I hope this code is never needed again.
+It is painfully savvy of: the address space inherited from the boot ROM, the real addresses and the address space it is building for base.
+<br>It interprets the set of real addresses at which RAM can be accessed,
+<br>Verifies assumptions about what addresses are functional and available,
+<br>Builds an optimized map so that base, which runs mapped on the SPARC, puts minimal load on the TLB (big pages),
+<br>Allocates a few ranges of virtual addresses for base storage.
+<br>Leaves a few crumbs of information (Missive) for base (mostly addresses),
+<br>Turns on the new map.
+<br>Abdicates in favor of base (go to m_kernelEntryAddress).
+<p>The program in main.cu is an ordinary C program to be run in a Unix environment where it has access to .o files for base and domain programs.
+It builds an ELF file for a big bang.
+<h3>Chatty Kernels</h3>
+I think kernels should not speak any natural language.
+They should interface to programs on one side and be the subject of debuggers on the other.
+However we did not invest in a debugger stub for the SPARC.
+We relied instead on base emitting error message and commentary over a rudimentary ascii start-stop uart.
+Upon panic RAM would be slowly copied back to a Solaris system to be examined as a corpse by gdb.
+There is a rudimentary printf style formatting routine in base whose sole
+purpose is emit blow by blow commentary elicited by certain debugging switches in lo-core.
+This would be better served by construction where base is the proper subject of a debugger such as gdb.
+<h3>Make and Jam</h3>
+Halfway thru the SPARC project we switched from <tt>make</tt> to <a href=http://www.perforce.com/jam/jam.html>Jam</a> by <a href=http://www.perforce.com/>Perforce</a> and that was a big productivity boost, mainly due to rebuild times.
+The .c and .h sources for base were in a directory tree that was designed to reflect the parts of the kernel which were processor dependent and system dependent.
+There were two faults in this:
+<br>as we mapped base files into this tree a number of errors were made
+and our source control package had obscure semantics regarding moving a file within a tree,
+<br>basic tools, such as <tt>grep</tt> were hard to use.
+<p>I think my productivity was greatly reduced by the later problem and this release delivers sources for base in a flat directory.
+The .c and .h files for the kernel are in the same directory.
+For now source files for programs auxiliary to base are in that directory but with peculiar file types.
+These auxiliary programs do not run in the kernel’s address space.
+I have not decided how to release the source for domain code.
+The current tree structure seems appropriate there.

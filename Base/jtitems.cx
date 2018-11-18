@@ -1,0 +1,121 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "item.h"
+#include "sysdefs.h"
+/* This goes with the code called "mem_bash.s" */
+
+static void nkey( // Snitched from itemh.h
+  short type,  /* the key type */
+  short db,    /* the data byte */
+  struct symr *np)  /* the node referenced */
+{
+   union DiskKey *p = &(nodes[curr_node_cda].keys[curr_key]);
+   nkeynosym(type, db,
+             np->isdef ? np->v.value : (long)np->v.place);
+   if (!np->isdef) {np->v.place=p->ik.cda;}
+   check_visited(np, 0);
+}
+
+prim_info_t *
+def_initial_items()
+{ 
+  prim_info_t *prim_infop;
+
+  dclsym(kernelnode);
+  dclsym(journalpage);
+  dclsym(primemeter);
+
+  dclsym(domtestcode);
+  dclsym(domhelpcode);
+
+  dclsym(domtestseg);
+  dclsym(domhelpseg);
+
+  dclsym(domteststack);
+  dclsym(domhelpstack);
+
+  dclsym(domtestdom);
+  dclsym(domhelpdom);
+
+  dclsym(domtestmrt);
+  dclsym(domhelpmrt);
+
+  dclsym(domtestgkn); 
+  dclsym(domhelpgkn);
+
+  dclstatesym(domtestgrn);
+  dclstatesym(domhelpgrn);
+
+  prim_infop = (prim_info_t *)malloc(sizeof(prim_info_t));
+
+  def_node(&kernelnode,0);   /* cda 1 */
+    dk0s(16);
+  pages(&journalpage,1,"");  /* cda 1 */
+
+  def_node(&primemeter,0);
+    dk(0);
+    nkey(meterkey,0,&supermeter);
+    dk(0);
+    dk2(0xffffff,0xffffffff);
+    dk2(0xffffff,0xffffffff);
+    dk2(0xffffff,0xffffffff);
+    dk0s(10);
+
+  cmsfile(&domtestcode,3,"domtest",1);
+  genseg(&domtestseg,3,&domtestcode);
+  cmsfile(&domhelpcode,2,"domhelp",1);
+  genseg(&domhelpseg,2,&domhelpcode);
+
+  pages(&domteststack,1,"");
+  pages(&domhelpstack,1,"");
+
+  def_node(&domtestmrt,0);
+   nkey(nodekey,3,&domtestseg);
+   pkey(&domteststack,0,0);
+   dk0s(14);
+
+  def_node(&domhelpmrt,0);
+   nkey(nodekey,3,&domhelpseg);
+   pkey(&domhelpstack,0,0);
+   dk0s(14);
+
+  def_node(&domhelpdom,1);
+   nkey(nodekey,0,&domhelpdom);
+   nkey(meterkey,0,&primemeter);
+   msckey(errormisckey,0);
+   nkey(nodekey,5,&domhelpmrt);
+   dk0s(9);
+   dk(1); /* busy */
+   nkey(nodekey,0,&domhelpgkn);
+   nkey(nodekey,0,&domhelpgrn);
+ 
+  def_node(&domhelpgkn,0);
+   dk0s(16);
+
+  def_statenode(domhelpgrn,0,0x00100f80);
+
+  def_node(&domtestdom,1);
+   nkey(nodekey,0,&domtestdom);
+   nkey(meterkey,0,&primemeter);
+   msckey(errormisckey,0);
+   nkey(nodekey,5,&domtestmrt);
+   dk0s(9);
+   dk(1); /* busy */
+   nkey(nodekey,0,&domtestgkn);
+   nkey(nodekey,0,&domtestgrn);
+ 
+  def_node(&domtestgkn,0);
+   dk0s(14);
+   devkey(255,0,0,0);
+   nkey(startkey,0,&domhelpdom);
+
+  def_statenode(domtestgrn,0,0x00100f80);
+
+  review();
+
+  prim_infop->nodecnt = curr_node_cda;
+  prim_infop->plistcnt = curr_plist;
+
+  return prim_infop;
+}

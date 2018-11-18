@@ -1,0 +1,378 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+/* formsubc.c -  Disk format subroutines */
+
+#include <string.h>
+#include "sysdefs.h"
+#include "kktypes.h"
+#include "types.h"
+#include "cvt.h"
+#include "lli.h"
+#include "cvt.h"
+#include "keyh.h"
+#include "formsubh.h"
+#include "alocpoth.h"
+#include "disknodh.h"
+#include "pdrh.h"
+#include "ioworkh.h"
+
+/*
+* FORMSUB - This set of routines performs the mainline disk formating.
+*
+* See formsubh.h for entry points.
+*
+*/
+
+/* The routines in the following header are used by formsub
+   during formatting, and must be supplied by the caller. */
+#include "formsu2h.h"
+
+
+static const LLI llione = {0,1};
+
+#define MAXRANGES 20
+struct workarea {
+   struct packstring packstr;
+   unsigned int numberofranges;
+   struct rangeinfo range[MAXRANGES];
+   struct AlocPot allocpot;
+   struct NodePot nodepot;
+   PDR pdr;
+};
+
+unsigned long forminit(void)
+/* See formsubh.h for specifications. */
+{  return sizeof(struct workarea);
+}
+
+#define wp ((struct workarea *)work)
+int formdev(
+   void *work,  /* Pointer to the workarea allocated by the caller */
+   const struct packstring *packstr)
+/* See formsubh.h for specifications. */
+{
+   /* Save the pack information. */
+   memcpy(&wp->packstr, packstr, sizeof(struct packstring));
+   wp->numberofranges = 0;
+   return 0;
+}
+
+int formrng(      /* Define a range */
+   void *work,  /* Pointer to the workarea allocated by the caller */
+   const struct rangeinfo *rnginf)
+/* See formsubh.h for specifications. */
+{
+   if (wp->numberofranges >= MAXRANGES) {
+      formmsg("Number of ranges exceeds implementation limit.\n");
+      return 8;
+   }
+
+   /* Check validity of data. */
+
+         if (rnginf->numcdas == 0) {
+            formmsg("Range CDA count may not be zero.\n");
+            return 8;
+         }
+         switch (rnginf->type) {
+          case SWAP2:
+          case SWAP1:
+            if (memcmp(rnginf->firstcda, "\0\0", 2) != 0) {
+               formmsg("Swap area CDA too large.\n");
+               return 8;
+            }
+            if (rnginf->numcdas > 65535) {
+               formmsg("64K or more pages in a swap range.\n");
+               return 8;
+            }
+            break;
+          case DUMP:
+            if (rnginf->multiplicity != 1) {
+               formmsg("Dump range must have only one copy.\n");
+               return 8;
+            }
+            /* Fall through to case below. */
+          case IPL:
+            if (rnginf->firstcda[0] & 0x80) {
+               formmsg("Dump or ipl range may not have node cdas.\n");
+               return 8;
+            }
+            /* Fall through to case below. */
+          case NORMAL:
+            /* Format non-swap ranges here. */
+            if (rnginf->multiplicity == 0
+                || rnginf->multiplicity > 32767) {
+               formmsg("Number of copies of range must be from 1 to 32767.\n");
+               return 8;
+            }
+            if (memcmp(rnginf->firstcda+1, "\0\0\0\0\0", 5) == 0
+                && (rnginf->firstcda[0] == 0
+                    || rnginf->firstcda[0] == 0x80 ) ) {
+               formmsg("First CDA may not be zero.\n");
+               return 8;
+            }
+            break;
+          default:
+            formmsg("Invalid range type.\n");
+            return 8;
+         } /* end of switch on range type */
+
+   /* Data is validated. Save it. */
+
+   memcpy(&wp->range[wp->numberofranges++],
+          rnginf, sizeof(struct rangeinfo));
+   return 0;
+}
+
+void initallocationpot(
+   struct AlocPot *potaddr,
+   unsigned char flagsval)
+/* Sets all allocation id's to 1. */
+{
+   int i;
+   for (i = 0; i < APOTDATACOUNT; i++) {
+      potaddr->entry[i].flags = flagsval;
+      int2b(1,
+            potaddr->entry[i].allocationid,
+            sizeof(potaddr->entry[i].allocationid) );
+   }
+   /* Set checkbyte */
+   potaddr->checkbyte = ((potaddr->entry[0].flags & ADATAINTEGRITY)
+           | ((*((unsigned char *)&potaddr->checkbyte - 1) ^ 0xff)
+              & ~ADATAINTEGRITY ) );
+}
+
+int formfmt(      /* Format. */
+   void *work)  /* Pointer to the workarea allocated by the caller */
+/* See formsubh.h for specifications. */
+{
+
+   /* Build the Pack Descriptor Record (PDR) from the range definitions. */
+
+   memzero(&wp->pdr, sizeof(wp->pdr));
+   memcpy(wp->pdr.pd.seedid, wp->packstr.packsetid,
+          sizeof(wp->pdr.pd.seedid));
+   memcpy(wp->pdr.pd.packserial, wp->packstr.packserial,
+          sizeof(wp->pdr.pd.packserial));
+   wp->pdr.pd.rangecount = wp->numberofranges
+       + (wp->packstr.ckptflag == NOCKPTHDR ? 0 : 1);
+            /* count any checkpoint header as a range */
+   if (wp->pdr.pd.rangecount > PDRANGES) {
+      formmsg("Too many ranges for space in pack descriptor.\n");
+      return 8;
+   }
+   wp->pdr.pd.version = 0;
+   wp->pdr.pd.integrity = 0;
+
+   /* Now format the range descriptors in the pack descriptor record. */
+
+   {
+      PDRD *pdrd = wp->pdr.ranges;
+      static struct rangeinfo *rnginf;
+      unsigned long currentpage = PDRPAGE+1;
+      int i;
+
+      rnginf = wp->range;
+      for (i=wp->numberofranges; i>0; i--) {
+         unsigned long numframes; /* will be number of disk page
+                 frames in this range. */
+
+         memzero(pdrd->migrationtod, sizeof(pdrd->migrationtod));
+         switch (rnginf->type) {
+          case SWAP2:
+          case SWAP1:
+            pdrd->type = rnginf->type;
+            int2b(rnginf->type, pdrd->nplex, sizeof(pdrd->nplex));
+                /* here too for some reason */
+            numframes = rnginf->numcdas;
+            break;
+          case DUMP:
+          case IPL:
+          case NORMAL:
+            /* Format non-swap ranges here. */
+            int2b(rnginf->multiplicity, pdrd->nplex, sizeof(pdrd->nplex));
+            pdrd->type = (uchar)rnginf->type;
+            if (rnginf->firstcda[0] & 0x80) {
+               /* A node range. */
+               numframes = (rnginf->numcdas + NPNODECOUNT - 1)/NPNODECOUNT;
+            } else {
+               /* A page range. */
+               numframes = rnginf->numcdas   /* pages */
+                           + (rnginf->numcdas + APOTDATACOUNT - 1)
+                                                  /* round up */
+                             / APOTDATACOUNT;    /* plus alloc pots */
+            }
+            if (numframes > 65535) {
+               formmsg("64K or more pages in a non-swap range.\n");
+               return 8;
+            }
+            break;
+         } /* end of switch on range type */
+         memcpy(pdrd->first, rnginf->firstcda, sizeof(rnginf->firstcda));
+         long2b(currentpage, pdrd->offset, sizeof(pdrd->offset));
+         currentpage += numframes;
+         {  /* Calculate last CDA */
+            LLI lastcda;
+            LLI llinumcdas = {0, 0};
+            llinumcdas.low = rnginf->numcdas;
+            b2lli(rnginf->firstcda, sizeof(rnginf->firstcda), &lastcda);
+            lliadd(&lastcda, &llinumcdas);
+            llisub(&lastcda, &llione);
+            lli2b(&lastcda, pdrd->last, sizeof(pdrd->last));
+         }
+         pdrd++;
+         rnginf++;
+      } /* end of loop over ranges */
+
+      /* If there is a checkpoint header, then format it here. */
+
+      switch (wp->packstr.ckptflag) {
+         unsigned long loc;
+       case NOCKPTHDR:
+         break;
+       case CKPTHDR1:
+         loc = PRIMARYCHECKPOINTHEADERLOCATION;
+         goto ckpthdrs;
+       case CKPTHDR2:
+         loc = SECONDARYCHECKPOINTHEADERLOCATION;
+       ckpthdrs:
+         long2b(loc, pdrd->first, sizeof(pdrd->first));
+         long2b(loc, pdrd->last, sizeof(pdrd->first));
+         long2b(0x8000, pdrd->nplex, sizeof(pdrd->nplex));
+         pdrd->type = PDRDCHECKPOINTHEADER;
+         memzero(pdrd->migrationtod, sizeof(pdrd->migrationtod));
+         long2b(currentpage, pdrd->offset, sizeof(pdrd->offset));
+         currentpage += 1;
+         pdrd++;
+         break;
+       default:
+         formmsg("Checkpoint header flag is invalid.\n");
+         return 8;
+      }
+   }
+   wp->pdr.pd.integrity = 0;
+   wp->pdr.precheck = 0;
+   wp->pdr.checkbyte = ~PDINTEGRITYCOUNTER;
+
+   /* Done formatting the PDR. */
+
+   /* Format the pack. */
+
+#if (PDRPAGE != 3)
+#error /* Don't know what is supposed to go at the beginning! */
+#endif
+
+   /* Write two zero pages (BBSIZE) */
+   if (formwrt(ZERO, NULL)) return 4;
+   if (formwrt(ZERO, NULL)) return 4;
+
+   /* Write page with magic number. */
+   /* Use wp->allocpot temporarily. */
+   memzero(&wp->allocpot, 4096);
+   *(unsigned long *)((char *)&wp->allocpot + PDR_MAGIC_OFFSET)
+      = PDR_MAGIC;
+   if (formwrt(WRDATA, &wp->allocpot)) return 4;
+
+   /* Write out the PDR. */
+   if (formwrt(WRDATA, &wp->pdr)) return 4;
+
+   /* Initialize the common allocation pot (used for all but dump ranges) */
+   initallocationpot(&wp->allocpot, ADATAVIRTUALZERO);
+
+   {
+      struct rangeinfo *rnginf = wp->range;
+      int i;
+
+      for (i=wp->numberofranges; i>0; i--) {
+         int j = rnginf->numcdas; /* number of cdas to format */
+         /* Format a range. */
+         if (rnginf->firstcda[0] & 0x80) {
+            /* Format a node range */
+            LLI currentcda;
+            
+            b2lli(rnginf->firstcda, sizeof(rnginf->firstcda), &currentcda);
+            for (; j>0;) { /* for each cda to format */
+               int k;
+               struct DiskNode *dnp = &wp->nodepot.disknodes[0];
+               /* Build one node pot. */
+               for (k=NPNODECOUNT; k>0;) {
+                  lli2b(&currentcda, dnp->cda, sizeof(dnp->cda));
+                  lliadd(&currentcda, &llione); /* increment cda */
+                  dnp->flags = 0;
+                  int2b(1, dnp->allocationid, sizeof(dnp->allocationid));
+                  int2b(1, dnp->callid, sizeof(dnp->callid));
+                  memzero(dnp->keys, sizeof(dnp->keys));
+                  k--;
+                  dnp++;
+                  if (--j == 0) { /* zero out trailing nodes */
+                     for (;k>0;--k) {
+                        memzero(dnp, sizeof(struct NodePot));
+                        dnp++;
+                     }
+                  }
+               }
+               memzero(wp->nodepot.migratedthismigration,
+                       sizeof(wp->nodepot.migratedthismigration));
+               /* Set checkbyte. */
+               wp->nodepot.checkbyte =
+                  (wp->nodepot.disknodes[0].flags & DNINTEGRITY)
+                   | (((*((char *)&wp->nodepot.checkbyte - 1))
+                       ^ 0xff) & ~DNINTEGRITY);
+               /* Write out the completed node pot. */
+               if (formwrt(WRDATA, &wp->nodepot)) return 4;
+            }
+         }
+         else switch (rnginf->type) {
+            int apcount;
+          case SWAP2:
+          case SWAP1:
+            /* Format a swap range */
+            for (; j>0; j--)
+               formwrt(NODATA, NULL); /* swap pages need not be initialized */
+            break;
+          case DUMP:
+            /* Format a dump range */
+            /* Dump range needs a special allocation pot. */
+            initallocationpot(&wp->allocpot, 0);
+            apcount = APOTDATACOUNT;
+            for (; j>0; j--) {
+               if (apcount == APOTDATACOUNT) {
+                  /* Time for an allocation pot. */
+                  if (formwrt(WRDATA, &wp->allocpot)) return 4;
+                  apcount = 0;
+               }
+               apcount++;
+               /* Dump pages are not virtual zero. */
+               if (formwrt(ZERO, NULL)) return 4;
+            }
+            /* Restore normal allocation pot for other ranges. */
+            initallocationpot(&wp->allocpot, ADATAVIRTUALZERO);
+            break;
+          case IPL:
+          case NORMAL:
+            /* Format a page range */
+            apcount = APOTDATACOUNT;
+            for (; j>0; j--) {
+               if (apcount == APOTDATACOUNT) {
+                  /* Time for an allocation pot. */
+                  if (formwrt(WRDATA, &wp->allocpot)) return 4;
+                  apcount = 0;
+               }
+               apcount++;
+               if (formwrt(NODATA, NULL)) return 4;
+            }
+         }
+         rnginf++;
+      } /* End of format a range. */
+   }
+   if (wp->packstr.ckptflag != NOCKPTHDR) {
+      /* Write a (zero) checkpoint header. */
+      if (formwrt(ZERO, NULL)) return 4;
+   }
+   /* Close out disk - Format is finished. */
+
+   formclosedev();
+
+   return 0;   /* All Done! */
+} /* end of formfmt */
+

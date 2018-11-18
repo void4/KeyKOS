@@ -1,0 +1,62 @@
+# VERSION $ID: $
+
+SubDir TOP src ;
+
+rule Kernel {
+    local _t = [ FGristFiles $(<) ] ;
+    local _o = $(>:S=$(SUFOBJ)) ;
+    DEPENDS all : $(_t) ;
+    DEPENDS $(_t) : $(_o) ;
+    ENTRY on _t = kk_entry ;
+	SetMapFile $(_t) : Mapfile ;
+    local _ts = [ Timestamp timestamp : $(_o) ] ;
+    _o += $(_ts:S=$(SUFOBJ)) ;
+    MakeLocate $(_t) : $(LOCATE_TARGET) ;
+    KernelLink $(_t) : $(_o) ;
+    Clean clean : $(_t) ;
+}
+rule KernelLink {
+    DEPENDS $(<) : $(>) ;
+}
+ENTRY_FLAG = "-e " ;
+actions together KernelLink bind LINKMAP NEEDLIBS {
+    $(LD) -dn $(ENTRY_FLAG)$(ENTRY) -o $(<) $(MAP_FLAG)$(LINKMAP) $(>) $(NEEDLIBS) $(LINKLIBS) -lc
+}
+
+Kernel kom : kernel ;
+
+# Bootable bootkernel : loader kernel text... ;
+rule Bootable {
+    local _t = [ FGristFiles $(<) ] ;
+	local _micro = $(>[1]) ;
+	local _kernel = [ FGristFiles $(>[2]) ] ;
+	local _args = $(>[3-]) ;
+    local _s = $(_micro) $(_kernel) $(_args) ;
+    DEPENDS all : $(_t) ;
+    DEPENDS $(_t) : $(_s) make_bootable_image ;
+    MAKER on $(_t) = make_bootable_image ;
+    MakeLocate $(_t) : $(LOCATE_TARGET) ;
+    SEARCH on $(_args) = $(SEARCH_SOURCE) ;
+    Bootable0 $(_t) : $(_s) ;
+}
+actions Bootable0 bind MAKER {
+    $(MAKER) $(>[1-2]) $(<) $(>[3-])
+}
+
+SEARCH_SOURCE += $(TOP)/tools ;
+Bootable kkboot : micro_loader kom forth ;
+
+# TODO dependencies in install
+rule InstallKernel {
+    InstallBin $(<) : $(>) ;
+    InstallKernel0 $(>:D=$(<)) ;
+}
+actions InstallKernel0 {
+    $(<:BS=setboot) $(<) ;
+}
+
+InstallKernel /tftpboot : kkboot ;
+
+for DIR in domains kernel {
+    SubInclude TOP src $(DIR) ;
+}

@@ -1,0 +1,14 @@
+<title>A version of Keykos in C</title>
+This is the collection of files that represents the most recent state of development of Keykos by Agorics which ceased sometime in 2003.
+This code ran to an extent on a hardware system from Sun called “Java Box” for which there is no documentation.
+The Java box had no specific support for Java—it was in fact merely a small 32 bit SPARC Sun computer.
+The Java box is not and has not been a commercial product from Sun.
+The disk IO was not debugged for the Java box.
+Disk IO and complete checkpoint logic is in the code but perhaps a bit atrophied as there is no SCSI logic for the Sun box and no documentation for the Java Box SCSI hardware adaptor.
+<p>We attached the Java box to a standard Sun work station over a start-stop RS232 interface talking tftp.
+Tftp would transfer a memory image from the work station to the Java box where upon kernel initialization would take over in the Java box and shortly thereafter the kernel and user mode code would begin.
+IO for the resultant Keykos system was restricted to input and output over the serial channel.
+<p>Most of the code is in C.
+There is some assembler code, of course, for the special processing of context switching and register window processing for the SPARC.
+We used gcc but probably did not use many of the language extensions provided by gcc.
+<p>The compilation system was Perforce’s open source Jam program system.

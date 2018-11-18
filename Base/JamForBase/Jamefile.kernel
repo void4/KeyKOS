@@ -1,0 +1,18 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel ;
+
+KERNEL_DIRLIST = $(PLAT) $(ARCH) $(CPUCHIP) $(MMU) common promif io primordial ;
+
+# build kernel.o from the libraries exported from subdirectories
+#
+CombinedOLibrary kernel : $(KERNEL_DIRLIST) ;
+
+# process the subdirectories
+#
+for KERNEL_DIR in $(KERNEL_DIRLIST) {
+    SubInclude TOP src kernel $(KERNEL_DIR) ;
+}
+
+
+

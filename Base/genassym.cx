@@ -1,0 +1,116 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "keyh.h"
+#include "locksh.h"
+#include "kertaskh.h"
+
+#define	emit_offset(sym, st, mem) \
+	printf("#define\t"#sym" 0x%x\n", (int)&(((st *)0)->mem))
+#define emit_value(sym, value) \
+	printf("#define\t"#sym" 0x%x\n", (value))
+
+int main()
+{
+	emit_value(LOCKEDBY_ASM_JRESUME, lockedby_asm_jresume);
+	emit_value(LOCKEDBY_ASM_DOM_TRAP, lockedby_asm_dom_trap);
+	emit_value(LOCKEDBY_ASM_JDOMAIN, lockedby_asm_jdomain);
+
+	emit_offset(KEY_LEFTCHAIN, struct Key, 
+		nontypedata.ik.item.pk.leftchain);
+	emit_offset(KEY_RIGHTCHAIN, struct Key, 
+		nontypedata.ik.item.pk.rightchain);
+	emit_offset(KEY_SUBJECT, struct Key, nontypedata.ik.item.pk.subject);
+	emit_offset(KEY_DK7_DATABODY, struct Key, nontypedata.dk7.databody);
+	emit_offset(KEY_DATABYTE, struct Key, databyte);
+	emit_value(KEY_DATABYTE_NOCALL, nocall);
+	emit_offset(KEY_TYPE, struct Key, type);
+	emit_value(KEY_SIZEOF, (int)sizeof(struct Key));
+	emit_value(KEY_TYPE_PREPARED, prepared);
+	emit_value(KEY_TYPE_INVOLVEDR, involvedr);
+	emit_value(KEY_TYPE_INVOLVEDW, involvedw);
+	emit_value(KEY_TYPEMASK, keytypemask);
+
+	emit_value(KT_STARTKEY, startkey);
+	emit_value(KT_RESUMEKEY, resumekey);
+	emit_value(KT_DATAKEY, datakey);
+	emit_value(KT_NODEKEY, nodekey);
+	emit_value(KT_DOMAINKEY, domainkey);
+	emit_value(KT_PIHK, pihk);
+	emit_value(RETURNRESUME, returnresume);
+	emit_value(RESTARTRESUME, restartresume);
+	emit_value(FAULTRESUME, faultresume);
+
+	emit_offset(CTE_CORELOCK, CTE, corelock);
+	emit_offset(CTE_BUSADDRESS, CTE, busaddress);
+	emit_value(CTE_SIZEOF, (int)sizeof (CTE));
+
+	emit_offset(MEMSEG_CTES, struct memseg, ctes);
+	emit_offset(MEMSEG_PAGES_BASE, struct memseg, pages_base);
+	emit_offset(MEMSEG_PAGES_END, struct memseg, pages_end);
+	emit_offset(MEMSEG_NEXT, struct memseg, next);
+
+	emit_offset(NODE_LEFTCHAIN, NODE, leftchain);
+	emit_offset(NODE_RIGHTCHAIN, NODE, rightchain);
+	emit_offset(NODE_CALLID, NODE, callid);
+	emit_offset(NODE_DIB, NODE, pf.dib);
+	emit_offset(NODE_PREPLOCK, NODE, preplock);
+	emit_value(HILRU, HILRU);
+	emit_offset(NODE_PREPCODE, NODE, prepcode);
+	emit_offset(NODE_FLAGS, NODE, flags);
+	emit_value(NFCALLIDUSED, NFCALLIDUSED);
+	emit_value(NFDIRTY, NFDIRTY);
+	emit_value(NFREJECT, NFREJECT);
+	emit_offset(NODEHEAD_SIZEOF, NODE, keys[0]);
+	emit_offset(NODE_DOMPRIO, NODE, domprio);
+	emit_offset(NODE_DOMKEEPER, NODE, domkeeper);
+	emit_offset(NODE_DOMHOOKKEY, NODE, domhookkey);
+	emit_offset(NODE_KPRIO, NODE, domprio.nontypedata.dk11.databody11[7]);
+	emit_offset(NODE_KPRIOTIME, NODE, 
+		domprio.nontypedata.dk11.databody11[3]);
+	emit_value(PREPASDOMAIN, prepasdomain);
+
+	emit_offset(ITEM_LEFTCHAIN, NODE, leftchain);
+	emit_offset(ITEM_RIGHTCHAIN, NODE, rightchain);
+
+	emit_offset(QUEUEHEAD_HEAD, struct QueueHead, head);
+
+	emit_offset(DIB_READINESS, struct DIB, readiness);
+		emit_value(DIB_TRAPPED, TRAPPED);
+		emit_value(DIB_BUSY, BUSY);
+		emit_value(DIB_HOOKED, HOOKED);
+		emit_value(DIB_LOWPRIORITY, LOWPRIORITY);
+	emit_offset(DIB_REGS, struct DIB, regs);
+	emit_offset(DIB_PC, struct DIB, pc);
+	emit_offset(DIB_NPC, struct DIB, npc);
+	emit_offset(DIB_PSR, struct DIB, psr);
+	emit_offset(DIB_FSR, struct DIB, fsr);
+	emit_offset(DIB_DEFERRED_FP, struct DIB, deferred_fp);
+	emit_offset(DIB_FP_REGS, struct DIB, fp_regs);
+	emit_offset(DIB_TRAPCODE, struct DIB, Trapcode);
+	emit_offset(DIB_TRAPCODEEXTENSION, struct DIB, trapcodeextension);
+	emit_offset(DIB_PERMITS, struct DIB, permits);
+	emit_value(DIB_FPPERMITTED, FPPERMITTED);
+	emit_value(DIB_GATEJUMPSPERMITTED, GATEJUMPSPERMITTED);
+	emit_offset(DIB_BACKMAX, struct DIB, backmax);
+	emit_offset(DIB_BACKDIBOLDEST, struct DIB, backdiboldest);
+	emit_offset(DIB_BACKALLOC, struct DIB, backalloc);
+	emit_offset(DIB_BACKSET, struct DIB, backset);
+	emit_offset(DIB_MAP, struct DIB, map);
+	emit_offset(DIB_CPUCACHE, struct DIB, cpucache);
+	emit_offset(DIB_LASTINVOLVED, struct DIB, lastinvolved);
+	emit_offset(DIB_KEYSNODE, struct DIB, keysnode);
+	emit_offset(DIB_ROOTNODE, struct DIB, rootnode);
+	emit_offset(DIB_DOM_CYCLES, struct DIB, dom_cycles);
+	emit_offset(DIB_DOM_INST, struct DIB, dom_instructions);
+	emit_offset(DIB_KER_CYCLES, struct DIB, ker_cycles);
+	emit_offset(DIB_KER_INST, struct DIB, ker_instructions);
+	emit_value(DIB_SIZEOF, (int)sizeof(struct DIB));
+
+	emit_offset(KERNEL_TASK_NEXT, struct KernelTask, next);
+	exit(0);
+	return 0;
+}

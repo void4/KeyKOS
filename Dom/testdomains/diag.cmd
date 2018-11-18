@@ -1,0 +1,12 @@
+kc user/sys/bsloadf 0 (,sb,m,sb) (,bsload)
+kc user/sys/vcsf 0 (,sb,m,sb) (,prg)
+kc bsload 0 (,test/diag,prg) (sa)
+kc prg 17 (,sb)  (,prgfac)
+kc user/sys/factoryc 0 (,sb,m) (,fbd)
+kc fbd 17+32 (sa,prgfac)
+kc fbd 128 (,user/sys/)
+kc user/sysnode 10 () (,peek)
+kc fbd 128+1 (,peek)
+cmdfile test/join.cmd
+kc fbd 66 () (,diagf)
+# kc fbd 66 () (,user/sys/diagf)

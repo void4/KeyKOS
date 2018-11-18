@@ -1,0 +1,14 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel sparc ;
+
+UseKernelFlags ;
+
+# The library is defined in two steps, C files and assembly files, 
+# just for convenience.
+OLibrary sparc : sparc_check.c sparc_jdomain.c sparc_ktqm.c sparc_time.c 
+				sparc_domain.c sparc_ksched.c sparc_mem.c sparc_cons.c 
+				sparc_uart.c sparc_map.c bkMap.c memcpy.c sparc_gdbstub.c
+				crt.s sparc_asm.s stret.s sparc_ddi.s ;
+
+

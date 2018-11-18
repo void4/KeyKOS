@@ -1,0 +1,45 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include <string.h>
+#include <stdio.h>
+#include "types.h"
+#include "itemdefh.h"
+#include "disknodh.h"
+extern int prim_nodecnt;
+extern int prim_plistcnt;
+extern int prim_pagecnt;
+extern plist_t prim_plist[];
+extern DiskNode_t prim_nodes[];
+
+long b2long(const uchar_t *, int);
+int main()
+{
+	int i;
+	plist_t *plp = prim_plist;
+	DiskNode_t *np = prim_nodes;
+	printf("#nodes = %d, #plists = %d, #pages = %d\n", prim_nodecnt, prim_plistcnt, prim_pagecnt);
+	for (i = 0; i < prim_plistcnt; i++) {
+		printf("plist[%d].number = %d\n", i, plp->number);
+		printf("plist[%d].filename = %s\n", i, plp->filename);
+		printf("plist[%d].first = %d\n", i, (int)plp->first);
+		printf("plist[%d].firstcda = %d\n", i, (int)plp->firstcda);
+		plp++;
+	}
+
+	for (i = 0; i < prim_nodecnt; i++) {
+		printf("nodes[%d].cda = %d\n", i, (int)b2long(np->cda, 6));
+		np++;
+	}
+return 0;}
+
+long b2long(const uchar_t *str, int len)
+{  
+	long v = 0L;
+	if (len > 4) {
+		str += len-4;
+		len = 4;
+	}
+	memcpy((char *)&v+4-len, str, len);
+	return v;
+}

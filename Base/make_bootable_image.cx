@@ -1,0 +1,561 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+/* make_bootable_image.c
+
+   this tool reads data from 2 ELF files
+   and generates an image bootable by Open Firmware
+
+   the first ELF file is a micro-loader which performs whatever tasks
+   are necessary for relocating the other segments of the boot image.
+
+   the second ELF file is the kernel executable.
+
+   the output file is generated with a boot header, followed immediately
+   by the micro-loader code.
+
+   following the micro-loader at the next 8 byte aligned address is
+   the loader's table which describes each of the loader segments of the
+   kernel in all the detail required for relocation.
+
+   after the micro-loader relocates the kernel, the kernel is entered by
+   invoking the destination address of the first relocation table entry.
+
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <elf.h>
+
+#define DUMP_INFO 0
+
+typedef struct {
+  unsigned long bf_magic;
+  unsigned long bf_text;
+  unsigned long bf_data;
+  unsigned long bf_bss;
+  unsigned long bf_pad1;
+  unsigned long bf_origin;
+  unsigned long bf_pad2;
+  unsigned long bf_format;
+} BootHeaderStruct;
+
+typedef struct {
+  unsigned long m_srcAddr;
+  unsigned long m_dstAddr;
+  unsigned long m_fileSize;
+  unsigned long m_memSize;
+  unsigned long m_elfFlags;
+} RelocTableEntry;
+
+typedef struct {
+  unsigned long m_magic;  /* should be 'Norm' in big-endian format */
+  unsigned long m_entryCount;
+  unsigned long m_firstUnusedPage;
+  unsigned long m_kernelEntryAddress;
+} RelocTable;
+
+struct ForthText {
+  struct ForthText *m_next;
+  unsigned long m_bytes;
+};
+typedef struct ForthText ForthText;
+
+#define PAGE_SIZE 4096
+
+enum {
+  kProgHeader,
+  kSectHeader,
+  kStringTab,
+  kNumELFTabs
+};
+
+Elf32_Ehdr rHdr, kHdr;
+char *lTab[kNumELFTabs], *kTab[kNumELFTabs];
+RelocTable rTable;
+RelocTableEntry *rTabEntries;
+
+
+static void Usage(char *commandName)
+{
+  fprintf(stderr, "Usage: %s <micro-loader file> <kernel file> <output file> [<forth files...>]\n",
+	  commandName);
+  fprintf(stderr, "  the micro-loader file always loads at 0x4000 and is location insensitive\n");
+  fprintf(stderr, "  the kernel file loads its sections into aligned pages following the loader\n");
+  fprintf(stderr, "  the output file is a boot image with an Open Firmware header\n");
+  fprintf(stderr, "  the optional forth files contain ASCII text and relocate to 0xF8001000\n");
+}
+
+/* we assume we are on a big-endian machine, but OF documentation
+   says that they expect big-endian numbers, so here we make sure */
+static unsigned long fixendian(unsigned long l)
+{
+  union {
+    char c[4];
+    unsigned long l;
+  } u;
+  
+  u.c[3] = (char) l;
+  l >>= 8;
+  u.c[2] = (char) l;
+  l >>= 8;
+  u.c[1] = (char) l;
+  l >>= 8;
+  u.c[0] = (char) l;
+  
+  return u.l;
+}
+
+static void gatherELFInfo(Elf32_Ehdr *elf, char *tab[kNumELFTabs], FILE *elfin, char *commandName)
+{
+  Elf32_Shdr *shdr;
+
+  /* read ELF header */
+  fread(elf, sizeof *elf, 1, elfin);
+
+#if DUMP_INFO
+printf(" file type: %d\n", elf->e_type);
+printf(" target machine: %d\n", elf->e_machine);
+printf(" file version: %d\n", elf->e_version);
+printf(" start address: 0x%X\n", elf->e_entry);
+printf(" phdr file offset: %d\n", elf->e_phoff);
+printf(" shdr file offset: %d\n", elf->e_shoff);
+printf(" file flags: 0x%X\n", elf->e_flags);
+printf(" sizeof ehdr: %d\n", elf->e_ehsize);
+printf(" sizeof phdr: %d\n", elf->e_phentsize);
+printf(" number phdrs: %d\n", elf->e_phnum);
+printf(" sizeof shdr: %d\n", elf->e_shentsize);
+printf(" number shdrs: %d\n", elf->e_shnum);
+printf(" shdr string index: %d\n\n", elf->e_shstrndx);
+#endif
+
+  /* allocate a program header table */
+  tab[kProgHeader] = (char*) malloc(elf->e_phentsize * elf->e_phnum);
+  if (tab[kProgHeader]) {
+    fseek(elfin, elf->e_phoff, SEEK_SET);
+    fread(tab[kProgHeader], elf->e_phentsize, elf->e_phnum, elfin);
+  }
+  else {
+    fprintf(stderr, "%s - out of memory allocating program header table\n",
+	    commandName);
+    exit(2);
+  }
+
+  /* allocate a section header table */
+  tab[kSectHeader] = (char*) malloc(elf->e_shentsize * elf->e_shnum);
+  if (tab[kSectHeader]) {
+    fseek(elfin, elf->e_shoff, SEEK_SET);
+    fread(tab[kSectHeader], elf->e_shentsize, elf->e_shnum, elfin);
+  }
+  else {
+    fprintf(stderr, "%s - out of memory allocating section header table\n",
+	    commandName);
+    exit(2);
+  }
+
+  /* get the section name string table */
+  shdr = (Elf32_Shdr*) (tab[1] + elf->e_shstrndx * elf->e_shentsize);
+  tab[kStringTab] = (char*) malloc(shdr->sh_size);
+  if (tab[kStringTab]) {
+    fseek(elfin, shdr->sh_offset, SEEK_SET);
+    fread(tab[kStringTab], 1, shdr->sh_size, elfin);
+  }
+  else {
+    fprintf(stderr, "%s - out of memory allocating section string table\n",
+	    commandName);
+    exit(2);
+  }
+}
+
+static unsigned long getMicroLoaderSize()
+{
+  int i;
+  for (i = 0; i < rHdr.e_shnum; ++i) {
+    Elf32_Shdr *shdr = (Elf32_Shdr*) (lTab[kSectHeader] + i * rHdr.e_shentsize);
+    char *sectionName = lTab[kStringTab] + shdr->sh_name;
+    if (!strcmp(sectionName, ".text")) {
+#if DUMP_INFO
+      printf("micro-loader text section:\n");
+      printf(" wants to load at: 0x%X\n", shdr->sh_addr);
+      printf(" is %d bytes long\n\n", shdr->sh_size);
+#endif
+      /* text segment */
+      return shdr->sh_size;
+    }
+  }
+  return 0;
+}
+
+static unsigned long buildRelocTable(unsigned long microLoaderSize, ForthText *forthText)
+{
+  int i;
+  Elf32_Phdr *phdr;
+  RelocTableEntry *rt;
+  unsigned long relocTableSize;
+  unsigned long kernelSrcAddr;
+
+  /* the following expansion avoids compiler warnings about multi-character constants */
+  rTable.m_magic = ('N' << 24) | ('o' << 16) | ('r' << 8) | 'm';
+  rTable.m_entryCount = 0;
+  rTable.m_kernelEntryAddress = kHdr.e_entry;
+
+  for (i = 0; i < kHdr.e_phnum; ++i) {
+    phdr = (Elf32_Phdr*) (kTab[kProgHeader] + i * kHdr.e_phentsize);
+    if (phdr->p_type == PT_LOAD) {
+      ++rTable.m_entryCount;
+    }
+  }
+
+  if (forthText != 0) {
+    ++rTable.m_entryCount;
+  }
+
+  relocTableSize = sizeof *rTabEntries * rTable.m_entryCount;
+  rTabEntries = (RelocTableEntry*) malloc(relocTableSize);
+  rt = rTabEntries;
+  relocTableSize += sizeof rTable;
+  microLoaderSize = (microLoaderSize + 7) & -8;
+  
+  kernelSrcAddr = 0x4000 + microLoaderSize + relocTableSize;
+  kernelSrcAddr = (kernelSrcAddr + PAGE_SIZE - 1) & -PAGE_SIZE;
+
+#if DUMP_INFO
+  printf("relocation table:\n");
+  printf(" has %d entries\n", rTable.m_entryCount);
+  printf(" total table size is %d\n", relocTableSize);
+  printf(" kernel boot load address is 0x%X\n", kernelSrcAddr);
+#endif
+
+  for (i = 0; i < kHdr.e_phnum; ++i) {
+    phdr = (Elf32_Phdr*) (kTab[kProgHeader] + i * kHdr.e_phentsize);
+    if (phdr->p_type == PT_LOAD) {
+      rt->m_srcAddr = kernelSrcAddr;
+      rt->m_dstAddr = phdr->p_vaddr;
+      rt->m_fileSize = phdr->p_filesz;
+      rt->m_memSize = phdr->p_memsz;
+      rt->m_elfFlags = phdr->p_flags;
+      /* KLUDGE!! */
+      if (rt->m_dstAddr == 0xF8000000)
+	rt->m_elfFlags |= PF_W;
+      /* END KLUDGE!! */
+#if 0
+      if (rt->m_dstAddr == 0) {
+	rt->m_dstAddr = kHdr.e_entry & -PAGE_SIZE;
+	rt->m_fileSize -= rt->m_dstAddr;
+	rt->m_memSize -= rt->m_dstAddr;
+      }
+#endif
+      kernelSrcAddr = (kernelSrcAddr + rt->m_fileSize + PAGE_SIZE - 1) & -PAGE_SIZE;
+
+#if DUMP_INFO
+      printf(" entry %d: srcAddr 0x%X\n", i, rt->m_srcAddr);
+      printf(" entry %d: dstAddr 0x%X\n", i, rt->m_dstAddr);
+      printf(" entry %d: fileSize %d\n", i, rt->m_fileSize);
+      printf(" entry %d: memSize %d\n", i, rt->m_memSize);
+      printf(" entry %d: flags 0x%X\n", i, rt->m_elfFlags);
+      printf(" entry %d: (file offset %d)\n", i, phdr->p_offset);
+#if 0
+      if (phdr->p_offset == 0) {
+	printf(" entry %d: (adjusted offset %d)\n", i, rt->m_dstAddr);
+      }
+#endif
+#endif
+      ++rt;
+    }
+  }
+
+  if (forthText) {
+    rt->m_srcAddr = kernelSrcAddr;
+    rt->m_dstAddr = 0xF8001000;
+    rt->m_fileSize = forthText->m_bytes;
+    rt->m_elfFlags = PF_R | PF_W | PF_X;
+   
+    forthText = forthText->m_next;
+    while (forthText) {
+      rt->m_fileSize += forthText->m_bytes;
+      forthText = forthText->m_next;
+    }
+
+    ++rt->m_fileSize; /* accomodate trailing null byte */
+    rt->m_memSize = rt->m_fileSize;
+
+#if DUMP_INFO
+      printf(" forth text: srcAddr 0x%X\n", rt->m_srcAddr);
+      printf(" forth text: dstAddr 0x%X\n", rt->m_dstAddr);
+      printf(" forth text: fileSize %d\n", rt->m_fileSize);
+      printf(" forth text: memSize %d\n", rt->m_memSize);
+      printf(" forth text: flags 0x%X\n", rt->m_elfFlags);
+#endif
+
+    kernelSrcAddr = (kernelSrcAddr + rt->m_fileSize + PAGE_SIZE - 1) & -PAGE_SIZE;
+
+    ++rt;
+  }
+
+  rTable.m_firstUnusedPage = kernelSrcAddr;
+#if 0
+  /* we normally expect the first loadable kernel address to be
+     its main entrypoint, although now that we have a loader doing
+     the work, there's no reason this must continue to be so.
+     the following code will assert that the kernel is bootable
+     under "old" assumptions, but it's no longer an error for the
+     entry address to be anywhere within the kernel code image.
+     */
+
+  if (rTable.m_kernelEntryAddress != rTabEntries->m_dstAddr) {
+    fprintf(stderr,"## inconsistency - kernel entry address (0x%X) "
+	    "is not at head of kernel image( 0x%X)\n",
+	    rTable.m_kernelEntryAddress, rTabEntries->m_dstAddr);
+  }
+#endif
+
+  --rt;
+  return rt->m_srcAddr + rt->m_fileSize - rTabEntries->m_srcAddr;
+}
+
+static void writeRelocCode(FILE *headF, FILE *bootout)
+{
+  int i;
+  for (i = 0; i < rHdr.e_shnum; ++i) {
+    Elf32_Shdr *shdr = (Elf32_Shdr*) (lTab[kSectHeader] + i * rHdr.e_shentsize);
+    char *sectionName = lTab[kStringTab] + shdr->sh_name;
+    if (!strcmp(sectionName, ".text")) {
+      
+      /* text segment */
+      unsigned long len = (shdr->sh_size + 7) & -8;
+      void *buffer = malloc(len);
+      memset(buffer, 0, len);
+      fseek(headF, shdr->sh_offset, SEEK_SET);
+      fread(buffer, 1, shdr->sh_size, headF);
+      fwrite(buffer, 1, len, bootout);
+      free(buffer);
+
+#if DUMP_INFO
+      printf("writing micro-loader code:\n");
+      printf(" bytes written (including zeros) %d\n", len);
+      printf(" src file read %d bytes from %d\n\n", shdr->sh_size, shdr->sh_offset);
+#endif
+      return;
+    }
+  }
+}
+
+static void zeroToNextPage(FILE *f)
+{
+  int curLoc = ftell(f) - sizeof(BootHeaderStruct);
+  int len = (PAGE_SIZE - curLoc) & (PAGE_SIZE - 1);
+#if DUMP_INFO
+  printf("zeroing to next page\n");
+  printf(" current file location is 0x%X\n", curLoc + sizeof(BootHeaderStruct));
+  printf(" or boot address 0x%X\n", curLoc + 0x4000);
+#endif
+  if (len != 0) {
+    void *buffer = malloc(len);
+    memset(buffer, 0, len);
+    fwrite(buffer, 1, len, f);
+    free(buffer);
+#if DUMP_INFO
+    printf(" zeroing %d bytes to next page\n", len);
+    curLoc = ftell(f) - sizeof(BootHeaderStruct);
+    printf(" current file pointer is %d\n", curLoc + sizeof(BootHeaderStruct));
+    printf(" which is at address 0x%X\n", curLoc + 0x4000);
+#endif
+  }
+#if DUMP_INFO
+  printf("\n");
+#endif
+}
+
+static void writeKernelCode(FILE *kernelF, FILE *bootout, ForthText *forthText)
+{
+  int i;
+#if DUMP_INFO
+  printf("writing %d kernel code loader segments\n", rTable.m_entryCount - (forthText != 0));
+#endif
+  for (i = 0; i < kHdr.e_phnum; ++i) {
+    Elf32_Phdr *phdr = (Elf32_Phdr*) (kTab[kProgHeader] + i * kHdr.e_phentsize);
+    if (phdr->p_type == PT_LOAD) {
+      void *buffer;
+      zeroToNextPage(bootout);
+      buffer = malloc(phdr->p_filesz);
+      fseek(kernelF, phdr->p_offset, SEEK_SET);
+      fread(buffer, 1, phdr->p_filesz, kernelF);
+      fwrite(buffer, 1, phdr->p_filesz, bootout);
+      free(buffer);
+#if DUMP_INFO
+      printf(" segment %d: wrote %d bytes from offset %d\n", i, phdr->p_filesz, phdr->p_offset);
+#endif
+    }
+  }
+#if DUMP_INFO
+  printf("\n");
+#endif
+}
+
+int main(int argc, char *argv[])
+{
+  int i;
+  BootHeaderStruct bhs;
+  FILE *headF, *kernelF, *bootout;
+  char *headName, *kernelName, *outputName;
+  unsigned long microLoaderSize;
+  unsigned long kernelLoadSize;
+  ForthText *forthText = 0;
+  ForthText *forthLast = 0;
+
+  char *commandName = argv[0];
+
+  if (argc < 4) {
+    Usage(commandName);
+    return 1;
+  }
+
+  headName = argv[1];
+  kernelName = argv[2];
+  outputName = argv[3];
+
+  for (i = 4; i < argc; ++i) {
+    FILE *forthFile = fopen(argv[i], "r");
+    if (!forthFile) {
+      fprintf(stderr, "%s - couldn't open text file \"%s\" for forth commands\n",
+	      commandName, argv[i]);
+    }
+    else {
+      int err = fseek(forthFile, 0, SEEK_END);
+      int fileSize = ftell(forthFile);
+#if DUMP_INFO
+      printf("opened file \"%s\" for forth commands\n", argv[i]);
+      printf("  reported file size is %d with seek error %d\n", fileSize, err);
+#endif
+      if (!err) {
+	err = fseek(forthFile, 0, SEEK_SET);
+	if (fileSize && !err) {
+	  ForthText *forthNext = (ForthText*) malloc(sizeof *forthNext + fileSize);
+	  if (!forthNext)
+	    err = -1;
+	  else {
+	    forthNext->m_next = 0;
+	    forthNext->m_bytes = 0;
+
+	    forthNext->m_bytes = fread(&forthNext[1], 1, fileSize, forthFile);
+#if DUMP_INFO
+	    printf("  read %d bytes, last char is 0x%X\n",
+		   forthNext->m_bytes, ((char*)(forthNext+1))[forthNext->m_bytes - 1]);
+#endif
+	    if (forthNext->m_bytes != fileSize) {
+	      err = -1;
+	      free(forthNext);
+	    }
+	    else if (!forthLast) {
+	      forthText = forthLast = forthNext;
+	    }
+	    else {
+	      forthLast->m_next = forthNext;
+	      forthLast = forthNext;
+	    }
+	  }
+	}
+      }
+      if (err) {
+	fprintf(stderr, "%s - error reading file \"%s\" for forth commands\n",
+		commandName, argv[i]);
+      }
+      fclose(forthFile);
+    }
+  }
+
+  headF = fopen(headName, "rb");
+  if (headF) {
+    kernelF = fopen(kernelName, "rb");
+    if (kernelF) {
+      bootout = fopen(outputName, "wb");
+      if (!bootout) {
+	fclose(headF);
+	fclose(kernelF);
+	fprintf(stderr, "%s - couldn't open image file \"%s\" for output\n",
+		commandName, outputName);
+	return 2;
+      }
+    }
+    else {
+      fclose(headF);
+      fprintf(stderr, "%s - couldn't open kernel file \"%s\" for input\n",
+	      commandName, kernelName);
+      return 2;
+    }
+  }
+  else {
+    fprintf(stderr, "%s - couldn't open header file \"%s\" for input\n",
+	    commandName, headName);
+    return 2;
+  }
+
+  /* read the ELF file info */
+#if DUMP_INFO
+  printf("micro-loader ELF file header:\n");
+#endif
+  gatherELFInfo(&rHdr, lTab, headF, commandName);
+#if DUMP_INFO
+  printf("kernel ELF file header:\n");
+#endif
+  gatherELFInfo(&kHdr, kTab, kernelF, commandName);
+
+  /* find out micro-loader size */
+  microLoaderSize = getMicroLoaderSize();
+#if DUMP_INFO
+  printf("microLoaderSize is %d\n", microLoaderSize);
+#endif
+
+  /* build the relocation table */
+  kernelLoadSize = buildRelocTable(microLoaderSize, forthText);
+#if DUMP_INFO
+  printf("kernelLoadSize is %d\n", kernelLoadSize);
+#endif
+
+  /* write the boot header */
+  bhs.bf_magic = 0x01030107;
+  bhs.bf_format = 0xFFFFFFFF;
+  bhs.bf_origin = 0x4000;
+  bhs.bf_text = rTabEntries->m_srcAddr - bhs.bf_origin;
+  bhs.bf_data = kernelLoadSize;
+  bhs.bf_bss = 0;
+  bhs.bf_pad1 = 0;
+  bhs.bf_pad2 = 0;
+#if DUMP_INFO
+  printf("bf_text (size) is %d\n", bhs.bf_text);
+  printf("bf_data (size) is %d\n", bhs.bf_data);
+  printf("bf_bss (size) is %d\n", bhs.bf_bss);
+#endif
+  
+  fwrite(&bhs, sizeof bhs, 1, bootout);
+
+  /* write the relocation code */
+  writeRelocCode(headF, bootout);
+
+  /* write the relocation table */
+  fwrite(&rTable, sizeof rTable, 1, bootout);
+  fwrite(rTabEntries, sizeof *rTabEntries, rTable.m_entryCount, bootout);
+  
+  /* write the kernel code */
+  writeKernelCode(kernelF, bootout, forthText);
+
+  /* write out forth text files */
+  if (forthText) {
+    zeroToNextPage(bootout);
+    do {
+      fwrite(&forthText[1], 1, forthText->m_bytes, bootout);
+#if DUMP_INFO
+      printf("wrote %d bytes of forth text\n", forthText->m_bytes);
+#endif
+      forthLast = forthText->m_next;
+      free(forthText);
+      forthText = forthLast;
+    } while (forthText);
+    fputc(0, bootout);
+  }
+
+  fclose(headF);
+  fclose(kernelF);
+  fclose(bootout);
+
+  return 0;
+}

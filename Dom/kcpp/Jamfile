@@ -1,0 +1,6 @@
+# VERSION $ID: $
+
+SubDir TOP src domains kcpp ;
+
+Main kcpp : kcpp.c eval.c codegen.c ;
+

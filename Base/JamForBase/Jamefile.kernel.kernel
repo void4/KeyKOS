@@ -1,0 +1,8 @@
+# VERSION $ID: $
+
+SubDir TOP src kernel viking ;
+
+UseKernelFlags ;
+SubDirCcFlags -D_KERNEL ;
+
+OLibrary viking : vik_asm.s ;

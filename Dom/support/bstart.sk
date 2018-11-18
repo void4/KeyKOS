@@ -1,0 +1,258 @@
+/* Copyright (c) 2005 Agorics; see MIT_License in this directory
+or http://www.opensource.org/licenses/mit-license.html */
+
+#include "keykosasm.h"
+#include "trap.h"
+#include "stack.h"
+ 
+! KEY SB=4;
+! KEY DOMKEY=3;
+! KEY DOMCRE=6
+! KEY TEMP=13;
+! KEY TEMP1=14;
+! KEY TEMP2=15;
+
+#define Domain_GetMemory 3
+#define Domain_SwapMemory 35 
+#define VCS_GetBaseSegmentKey 6
+#define VCS_Freeze  17
+#define DC_Destroy 1
+#define DC_DestroyMe 8
+#define DESTROY 0x80000004
+
+        .seg ".text"
+
+        .type _start, #function
+        .global _start
+        .type sbrk, #function
+        .global sbrk
+        .type _sbrk, #function
+        .global _sbrk
+        .type _cerror, #function
+        .global _cerror
+        .type ___errno, #function
+        .global ___errno
+        .type errno, #object
+        .global errno
+        .type crash, #function
+        .global crash
+        .type _mutex_lock, #function
+        .global _mutex_lock
+        .type _mutex_unlock, #function
+        .global _mutex_unlock
+        .type exit, #function
+        .global exit
+        .type freezedry, #function
+        .global freezedry
+  
+        .ascii "FACTORY "
+        .word   factory 
+        .word   title
+
+_start:   /* oc in %i3 and ordinal in %i4 */
+        or    %i3, %g0, %o0
+        or    %i4, %g0, %o1 /* becomes i0,i1 after factory() does save */
+        sethi %hi(cursbrk), %l1
+        ld    [%l1 + %lo(cursbrk)], %l2
+        add   %l2, 4095, %l2
+        srl   %l2, 12, %l2
+        sll   %l2, 12, %l2
+        st    %l2, [%l1 + %lo(cursbrk)]
+        set   0x0FFFFF80,%sp
+        call   factory
+        nop
+        
+/* return means exit */
+
+        set 0, %o0
+exit:
+        or  %o0, %g0, %l6
+        KALL (DOMKEY,Domain_GetMemory) KEYSTO(TEMP);
+        KALL (TEMP,VCS_GetBaseSegmentKey) KEYSTO(TEMP);
+        KALL (DOMKEY,Domain_SwapMemory) KEYSFROM(TEMP) KEYSTO(TEMP);
+        KALL (TEMP, DESTROY) RCTO(rc);
+
+/*      KALL (DOMCRE, DC_DestroyMe) CHARFROM(R14*4,4,R) KEYSFROM(CALLER,SB); */
+      
+        OC(DC_DestroyMe)
+        XB(0xCC602400)
+        NB(0x00000000)
+        PS2(22*4,4)  /* %l6 */
+        cjcc(0,0)
+
+        ta ST_KEYERROR 
+
+freezedry:
+        save   %sp, -SA(MINFRAME), %sp
+        ta 3   ! make sure registers are in the stack
+
+        set    iregs,%l0
+        std    %i0, [%l0 + 0]
+        std    %i2, [%l0 + 8]
+        std    %i4, [%l0 + 16]
+        std    %i6, [%l0 + 24]
+        set    oregs,%l0
+        std    %o0, [%l0 + 0]
+        std    %o2, [%l0 + 8]
+        std    %o4, [%l0 + 16]
+        std    %o6, [%l0 + 24]
+        set    gregs,%l0
+        std    %g0, [%l0 + 0]
+        std    %g2, [%l0 + 8]
+        std    %g4, [%l0 + 16]
+        std    %g6, [%l0 + 24]
+
+        KALL (DOMKEY,Domain_GetMemory) KEYSTO(TEMP2);
+        KALL (TEMP2,VCS_Freeze) KEYSFROM(SB) KEYSTO(TEMP2);
+
+        set restart,%l6
+       
+        OC(0)
+        XB(0x8C20f000)
+        PS2(22*4,4)      /* %l6 */
+        fj(0,0)
+
+        set  0, %l6
+/*      KALL (DOMCRE, Destroy) KEYSFROM(DOM,SB);  */
+      
+        OC(DC_Destroy)
+        XB(0xC0603400)
+        NB(0x00000000)
+        cjcc(0,0)
+
+        ta  ST_KEYERROR
+
+restart:    ! i3 has the order code on the restart
+        or    %i3, %g0, %l3
+
+        set iregs,%l0
+        ldd [%l0 + 0], %i0
+        ldd [%l0 + 8], %i2
+        ldd [%l0 + 16], %i4
+        ldd [%l0 + 24], %i6
+        set oregs,%l0
+        ldd [%l0 + 0], %o0
+        ldd [%l0 + 8], %o2
+        ldd [%l0 + 16], %o4
+        ldd [%l0 + 24], %o6
+        set gregs,%l0
+        ldd [%l0 + 0], %g0
+        ldd [%l0 + 8], %g2
+        ldd [%l0 + 16], %g4
+        ldd [%l0 + 24], %g6
+
+        or  %l3, %g0, %i0    ! return value is restart oc
+        ret
+        restore     ! this is after the new object is created
+    
+___errno:
+        sethi  %hi(errno), %o0
+        retl
+        or     %o0, %lo(errno), %o0
+
+_cerror:
+        sethi  %hi(errno), %g1
+        st     %o0, [%g1 + %lo(errno)]
+        retl
+        mov    -1, %o0
+
+_mutex_lock:
+_mutex_unlock:
+        retl
+        set 0, %o0
+
+_sbrk:
+sbrk:          
+        save   %sp, -SA(MINFRAME), %sp
+
+        or     %i0, %g0, %i2
+        set    cursbrk, %l1
+        ld     [%l1], %i0
+        add    %i0, %i2, %i2
+        st     %i2, [%l1]        ! i0 has the return value
+
+        set    0xFFFFF000, %l3
+        and    %i0, %l3, %i0
+        and    %i2, %l3, %i2
+        cmp    %i2, %i0
+        ble    sbrkret
+        or     %i2,%g0,%o0
+        set    0, %o1
+        call   memset
+        sub    %i2, %i0, %o2    ! zero all the pages, sorry
+
+sbrkret:                        ! i0 still has return value
+        ret
+        restore
+
+crash:
+        ta      ST_KEYERROR    
+
+	nop
+
+        .type  setjmp, #function
+        .global setjmp
+
+setjmp:
+        clr     [%o0]
+        st      %sp, [%o0 + 4]
+        add     %o7, 8, %o1
+        st      %o1, [%o0 + 8]
+        st      %fp, [%o0 + 12]
+        st      %i7, [%o0 + 16]
+
+        std     %i0, [%o0 + 24]
+        std     %i2, [%o0 + 32]
+        std     %i4, [%o0 + 40]
+        std     %i6, [%o0 + 48]
+
+        std     %l0, [%o0 + 56]
+        std     %l2, [%o0 + 64]
+        std     %l4, [%o0 + 72]
+        std     %l6, [%o0 + 80]
+
+        retl
+        mov     %g0, %o0
+
+        .type longjmp, #function
+        .global longjmp
+longjmp:
+        ta      3
+
+        ldd     [%o0 + 24], %i0
+        ldd     [%o0 + 32], %i2
+        ldd     [%o0 + 40], %i4
+        ldd     [%o0 + 48], %i6
+
+        ldd     [%o0 + 56], %l0
+        ldd     [%o0 + 64], %l2
+        ldd     [%o0 + 72], %l4
+        ldd     [%o0 + 80], %l6
+
+        ld      [%o0 + 4], %sp
+        ld      [%o0 + 8], %o7
+        ld      [%o0 + 12], %fp
+        ld      [%o0 + 16], %i7
+
+        tst     %o1
+        bne     1f
+        sub     %o7, 8, %o7
+        mov     1, %o1
+1:      retl
+        mov     %o1, %o0
+
+
+        .seg ".data"
+
+       .align 4
+errno:
+       .word 0
+temp:
+       .word 0
+cursbrk:
+       .word _end
+
+       .align 8
+iregs:  .word 0,0,0,0,0,0,0,0
+oregs:  .word 0,0,0,0,0,0,0,0
+gregs:  .word 0,0,0,0,0,0,0,0
